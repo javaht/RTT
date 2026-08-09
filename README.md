@@ -1,6 +1,6 @@
-# RTT
+# RTT(Real Time Translate)
 
-RTT 是一款运行在 macOS 菜单栏的实时字幕翻译工具。它捕获系统音频，使用 Apple SpeechAnalyzer 在设备端识别语音，再通过 Bing 将识别结果翻译成简体中文。
+RTT(Real Time Translate) 是一款运行在 macOS 菜单栏的实时字幕翻译工具。它捕获系统音频，使用 Apple SpeechAnalyzer 在设备端识别语音，再通过 Bing 将识别结果翻译成简体中文。
 
 ## 功能
 
