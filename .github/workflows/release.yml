@@ -1,0 +1,113 @@
+name: Build and Release DMG
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, for example 1.0.0"
+        required: true
+        default: "1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build-architecture:
+    name: Build ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-26
+          - arch: x86_64
+            runner: macos-26-intel
+    runs-on: ${{ matrix.runner }}
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_ENV_HINTS: "1"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build architecture-specific app
+        env:
+          RELEASE_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.version }}
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_VERSION#v}"
+          scripts/build-arch-app.sh \
+            "${{ matrix.arch }}" \
+            "$RUNNER_TEMP/RTT-${{ matrix.arch }}" \
+            "$VERSION" \
+            "$GITHUB_RUN_NUMBER"
+
+      - name: Upload architecture artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RTT-app-${{ matrix.arch }}
+          path: ${{ runner.temp }}/RTT-${{ matrix.arch }}/RTT.app
+          if-no-files-found: error
+          retention-days: 7
+
+  assemble-and-release:
+    name: Assemble Universal DMG
+    needs: build-architecture
+    runs-on: macos-26
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Download arm64 app
+        uses: actions/download-artifact@v4
+        with:
+          name: RTT-app-arm64
+          path: ${{ runner.temp }}/RTT-app-arm64
+
+      - name: Download Intel app
+        uses: actions/download-artifact@v4
+        with:
+          name: RTT-app-x86_64
+          path: ${{ runner.temp }}/RTT-app-x86_64
+
+      - name: Assemble and create DMG
+        env:
+          RELEASE_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.version }}
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_VERSION#v}"
+          mkdir -p dist
+          scripts/assemble-universal-dmg.sh \
+            "$RUNNER_TEMP/RTT-app-arm64/RTT.app" \
+            "$RUNNER_TEMP/RTT-app-x86_64/RTT.app" \
+            "$GITHUB_WORKSPACE/dist" \
+            "$VERSION"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RTT-universal-dmg
+          path: |
+            dist/*.dmg
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="${RELEASE_VERSION}"
+          if [[ "$TAG" != v* ]]; then
+            TAG="v$TAG"
+          fi
+          gh release create "$TAG" dist/*.dmg dist/*.sha256 \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "RTT ${TAG#v}" \
+            --generate-notes

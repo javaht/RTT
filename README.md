@@ -69,6 +69,19 @@ open dist/RTT.app
 swift test
 ```
 
+## GitHub 自动发布 Universal DMG
+
+向 GitHub 推送版本标签即可触发发布：
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+GitHub Actions 会分别在 Apple Silicon 和 Intel Runner 上构建，然后合并 RTT 主程序、GNU Awk 及其运行库，生成同时支持 `arm64` 和 `x86_64` 的 `RTT-1.0.0-universal.dmg`，并自动创建 GitHub Release。也可以在 Actions 页面手动运行工作流并填写版本号。
+
+默认使用临时签名，DMG 可以下载和运行，但 macOS 可能显示“无法验证开发者”。如果需要免警告分发，需要在 GitHub Actions 中配置 Apple Developer 的签名证书、公证凭据，并把工作流的签名步骤接入你的组织凭据管理。
+
 ## 权限与隐私
 
 - 系统音频由 RTT 捕获，并通过 Apple SpeechAnalyzer 在本机完成语音识别。
