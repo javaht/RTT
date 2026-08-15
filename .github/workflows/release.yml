@@ -50,7 +50,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: RTT-app-${{ matrix.arch }}
-          path: ${{ runner.temp }}/RTT-${{ matrix.arch }}/RTT.app
+          path: ${{ runner.temp }}/RTT-${{ matrix.arch }}
           if-no-files-found: error
           retention-days: 7
 
