@@ -75,5 +75,8 @@ hdiutil create \
 
 lipo -archs "$RTT_UNIVERSAL_APP/Contents/MacOS/RTT"
 lipo -archs "$RTT_UNIVERSAL_APP/Contents/Resources/gawk"
-shasum -a 256 "$RTT_DMG_PATH" > "$RTT_DMG_PATH.sha256"
+(
+    cd "$RTT_OUTPUT_DIR"
+    shasum -a 256 "$(basename "$RTT_DMG_PATH")" > "$(basename "$RTT_DMG_PATH").sha256"
+)
 echo "Built $RTT_DMG_PATH"
