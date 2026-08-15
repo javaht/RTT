@@ -73,7 +73,7 @@ swift test
 
 在 GitHub 仓库中打开 `Actions` → `Build and Release DMG` → `Run workflow`，填写版本号（例如 `1.2.0`）并运行。
 
-GitHub Actions 会分别在 Apple Silicon 和 Intel Runner 上构建，然后合并 RTT 主程序、GNU Awk 及其运行库，生成同时支持 `arm64` 和 `x86_64` 的 `RTT-1.2.0-universal.dmg`，自动创建 `v1.2.0` 标签和 GitHub Release。推送 Git 标签或普通代码提交不会自动发布。
+GitHub Actions 会分别在 Apple Silicon 和 Intel Runner 上构建，然后合并 RTT 主程序、GNU Awk 及其运行库，生成同时支持 `arm64` 和 `x86_64` 的 `RTT-1.2.0-universal.dmg`，自动创建 `v1.2.0` 标签和 GitHub Release。DMG 内包含 `RTT.app` 和 `Applications` 快捷方式，直接把 RTT 拖到 Applications 即可安装。推送 Git 标签或普通代码提交不会自动发布。
 
 默认使用临时签名，DMG 可以下载和运行，但 macOS 可能显示“无法验证开发者”。如果需要免警告分发，需要在 GitHub Actions 中配置 Apple Developer 的签名证书、公证凭据，并把工作流的签名步骤接入你的组织凭据管理。
 

@@ -14,6 +14,7 @@ RTT_VERSION=$4
 RTT_UNIVERSAL_APP="$RTT_OUTPUT_DIR/RTT.app"
 RTT_FRAMEWORKS_DIR="$RTT_UNIVERSAL_APP/Contents/Frameworks"
 RTT_RESOURCES_DIR="$RTT_UNIVERSAL_APP/Contents/Resources"
+RTT_DMG_STAGING_DIR=$(mktemp -d)
 
 [[ -d "$RTT_ARM_APP" ]] || { echo "Missing arm64 app: $RTT_ARM_APP" >&2; exit 1; }
 [[ -d "$RTT_INTEL_APP" ]] || { echo "Missing x86_64 app: $RTT_INTEL_APP" >&2; exit 1; }
@@ -66,9 +67,11 @@ codesign \
 codesign --verify --deep --strict "$RTT_UNIVERSAL_APP"
 
 RTT_DMG_PATH="$RTT_OUTPUT_DIR/RTT-$RTT_VERSION-universal.dmg"
+cp -R "$RTT_UNIVERSAL_APP" "$RTT_DMG_STAGING_DIR/RTT.app"
+ln -s /Applications "$RTT_DMG_STAGING_DIR/Applications"
 hdiutil create \
     -volname RTT \
-    -srcfolder "$RTT_UNIVERSAL_APP" \
+    -srcfolder "$RTT_DMG_STAGING_DIR" \
     -ov \
     -format UDZO \
     "$RTT_DMG_PATH"
