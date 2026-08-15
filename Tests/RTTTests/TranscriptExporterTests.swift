@@ -6,12 +6,14 @@ struct TranscriptExporterTests {
     func testSRTExportsOrderedBilingualEntriesWithTimestamps() {
         let entries = [
             TranslationEntry(
+                orderID: 0,
                 source: "Bonjour.",
                 target: "你好。",
                 startTime: 1.234,
                 endTime: 3.456
             ),
             TranslationEntry(
+                orderID: 1,
                 source: "Au revoir.",
                 target: "再见。",
                 startTime: 4,
@@ -37,8 +39,8 @@ struct TranscriptExporterTests {
     @Test
     func testTXTExportsBilingualParagraphs() {
         let entries = [
-            TranslationEntry(source: "Hello.", target: "你好。"),
-            TranslationEntry(source: "Thanks.", target: "谢谢。"),
+            TranslationEntry(orderID: 0, source: "Hello.", target: "你好。"),
+            TranslationEntry(orderID: 0, source: "Thanks.", target: "谢谢。"),
         ]
 
         #expect(TranscriptExporter.txt(entries: entries) == "Hello.\n你好。\n\nThanks.\n谢谢。")
@@ -47,6 +49,7 @@ struct TranscriptExporterTests {
     @Test
     func testTranslationFailureExportsOnlyOriginalText() {
         let entry = TranslationEntry(
+            orderID: 0,
             source: "Original text.",
             target: "⚠️ 翻译失败（无结果）",
             startTime: 2,

@@ -1,6 +1,7 @@
 import AppKit
 import CoreMedia
 import SwiftUI
+import Synchronization
 
 @main
 struct RTTApp: App {
@@ -105,6 +106,263 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+// MARK: - 提交跟踪
+
+/// 一条识别出的完整句子（偏移相对当前“新文本块”）。
+struct CompletedSentence {
+    let text: String
+    let startOffset: Int
+    let endOffset: Int
+}
+
+/// 从文本中切出以句号类标点结尾的完整句子。
+/// 返回句子数组与“已消费”的字符数（最后一个终止符之后不再消费）。
+func completeSentences(in text: String) -> (sentences: [CompletedSentence], consumed: Int) {
+    let terminators: Set<Character> = [".", "!", "?", "。", "！", "？", "\n"]
+    var sentences: [CompletedSentence] = []
+    var sentenceStart = text.startIndex
+    var consumed = 0
+
+    for index in text.indices where terminators.contains(text[index]) {
+        let sentenceEnd = text.index(after: index)
+        let sentence = String(text[sentenceStart..<sentenceEnd])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !sentence.isEmpty {
+            sentences.append(.init(
+                text: sentence,
+                startOffset: text.distance(from: text.startIndex, to: sentenceStart),
+                endOffset: text.distance(from: text.startIndex, to: sentenceEnd)
+            ))
+        }
+        consumed = text.distance(from: text.startIndex, to: sentenceEnd)
+        sentenceStart = sentenceEnd
+    }
+
+    return (sentences, consumed)
+}
+
+/// 一条已提交的句子记录（用于回滚时定位条目）。
+struct CommittedLine: Sendable {
+    let text: String
+    let range: Range<Int>           /// 在 committed 字符串中的范围
+    let orderID: Int                /// 翻译请求 id（= 提交顺序）
+    let startTime: TimeInterval
+    let endTime: TimeInterval
+    var appended: Bool = false
+}
+
+/// 跟踪已提交的识别文本前缀，维护逐行记录以支持回滚。
+/// 不变式：本结构只消费 append-only 的 finalized 文本（见 SystemAudioTranscriber
+/// 的 consume*Results：finalizedText 仅由 isFinal 结果的文本 += 单向累积，每个 final
+/// 对应独立音频 range），因此 committed 始终是当前 finalized 的前缀。
+/// 当前缀关系被破坏（识别器修订已 final 文本），回滚 committed 到共同前缀并删除
+/// 对应的行记录，App 侧据此撤销已显示条目并重新提交修正文本。
+struct CommittedTextTracker {
+    private(set) var committed: String = ""
+    private(set) var lines: [CommittedLine] = []
+    private(set) var nextOrderID: Int = 0
+
+    /// pendingText 的返回结果。
+    struct Pending {
+        let text: String            /// 相对 retainedCount 的差分文本
+        let rolledBack: Bool        /// 是否发生了回滚（前缀关系被破坏）
+        let retainedCount: Int      /// 可安全保留的 committed 前缀长度（不会截断句子）
+    }
+
+    /// 返回相对已提交前缀的新增文本（差分）。
+    /// 正常情况（rolledBack == false）：text 为 committed.count 之后的新增部分。
+    /// 若前缀关系被破坏（rolledBack == true）：回退到最早受影响句子的起点，
+    /// text 包含该句的完整修订文本，调用方需调用 rollback(to:) 清理 stale 行。
+    mutating func pendingText(for finalizedText: String) -> Pending {
+        if finalizedText.hasPrefix(committed) {
+            return Pending(
+                text: String(finalizedText.dropFirst(committed.count)),
+                rolledBack: false,
+                retainedCount: committed.count
+            )
+        }
+        let commonCount = committed.commonPrefix(with: finalizedText).count
+        let retainedCount = lines.first(where: { $0.range.upperBound > commonCount })?
+            .range.lowerBound ?? commonCount
+        return Pending(
+            text: String(finalizedText.dropFirst(retainedCount)),
+            rolledBack: true,
+            retainedCount: retainedCount
+        )
+    }
+
+    /// 追加一段已提交文本（仅推进 committed 指针，不创建行记录）。
+    mutating func commitConsumedText(_ text: String) {
+        committed += text
+    }
+
+    /// 登记一条已提交的句子（创建行记录，推进 nextOrderID）。
+    /// 必须在 commitConsumedText 之后、consumer 已拿到 orderID 时调用。
+    mutating func registerLine(
+        text: String,
+        baseOffset: Int,
+        sentenceStart: Int,
+        sentenceEnd: Int,
+        startTime: TimeInterval,
+        endTime: TimeInterval,
+        orderID: Int
+    ) {
+        let start = baseOffset + sentenceStart
+        let end = baseOffset + sentenceEnd
+        lines.append(CommittedLine(
+            text: text,
+            range: start..<end,
+            orderID: orderID,
+            startTime: startTime,
+            endTime: endTime
+        ))
+        nextOrderID = max(nextOrderID, orderID + 1)
+    }
+
+    /// 标记一条行已追加到面板。
+    mutating func markAppended(orderID: Int) {
+        guard let i = lines.firstIndex(where: { $0.orderID == orderID }) else { return }
+        lines[i].appended = true
+    }
+
+    /// 回滚到 retainedCount 位置：截断 committed 字符串，删除所有超出共同前缀的行。
+    /// 返回需要处理的行信息。
+    struct RollbackLines {
+        /// 被删除的行（面板需移除 orderID 对应的条目）
+        let staleLines: [CommittedLine]
+        /// 保留但未显示的行（翻译在途被丢弃，需重提交）
+        let retainedUndisplayed: [CommittedLine]
+    }
+
+    mutating func rollback(to retainedCount: Int) -> RollbackLines {
+        let stale = lines.filter { $0.range.upperBound > retainedCount }
+        let retainedUndisplayed = lines.filter {
+            $0.range.upperBound <= retainedCount && !$0.appended
+        }
+        lines.removeAll { $0.range.upperBound > retainedCount }
+        committed = String(committed.prefix(retainedCount))
+        return RollbackLines(staleLines: stale, retainedUndisplayed: retainedUndisplayed)
+    }
+
+    mutating func reset() {
+        committed = ""
+        lines.removeAll()
+        nextOrderID = 0
+    }
+}
+
+// MARK: - 并发翻译
+
+/// 一次翻译请求。
+struct TranslationRequest: Sendable {
+    let id: Int
+    let text: String
+    let startTime: TimeInterval
+    let endTime: TimeInterval
+    let generation: Int
+    /// 翻译代次：回滚时递增，迟到/在途的旧代次请求在提交时被丢弃。
+    let epoch: Int
+}
+
+/// 有界并发翻译请求队列（Mutex 保护；入队/关闭保持同步，避免异步链式传播）。
+private final class TranslationQueue: @unchecked Sendable {
+    private struct State: Sendable {
+        var pending: [TranslationRequest] = []
+        var waiters: [CheckedContinuation<TranslationRequest?, Never>] = []
+        var isOpen = true
+    }
+
+    private let lock = Mutex(State())
+
+    func enqueue(_ request: TranslationRequest) {
+        lock.withLock { state in
+            guard state.isOpen else { return }
+            if let waiter = state.waiters.first {
+                state.waiters.removeFirst()
+                waiter.resume(returning: request)
+            } else {
+                state.pending.append(request)
+            }
+        }
+    }
+
+    func next() async -> TranslationRequest? {
+        let direct = lock.withLock { state -> TranslationRequest? in
+            guard state.isOpen else { return nil }
+            if !state.pending.isEmpty {
+                return state.pending.removeFirst()
+            }
+            return nil
+        }
+        if let direct { return direct }
+
+        // 注册等待者前再次检查，避免错过入队唤醒；
+        // close() 后不再注册新 waiter，避免永久挂起
+        return await withCheckedContinuation { continuation in
+            lock.withLock { state in
+                guard state.isOpen else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                if !state.pending.isEmpty {
+                    let request = state.pending.removeFirst()
+                    continuation.resume(returning: request)
+                } else {
+                    state.waiters.append(continuation)
+                }
+            }
+        }
+    }
+
+    func close() {
+        lock.withLock { state in
+            state.isOpen = false
+            let suspended = state.waiters
+            state.waiters.removeAll()
+            state.pending.removeAll()
+            for waiter in suspended {
+                waiter.resume(returning: nil)
+            }
+        }
+    }
+}
+
+/// 按请求 id 有序提交翻译结果：乱序到达的结果在缓冲中等待前置完成。
+struct TranslationOrderBuffer {
+    private(set) var results: [Int: TranslationEntry] = [:]
+    private(set) var nextID = 0
+
+    /// 存入一条结果，返回当前可以按序追加的条目（可能为空）。
+    mutating func commit(_ entry: TranslationEntry, id: Int) -> [TranslationEntry] {
+        results[id] = entry
+        var ready: [TranslationEntry] = []
+        while let next = results.removeValue(forKey: nextID) {
+            ready.append(next)
+            nextID += 1
+        }
+        return ready
+    }
+
+    /// 丢弃 id >= threshold 的结果，并把提交游标退回 threshold。
+    /// 如果 threshold 尚未到达，则保留当前游标，避免跳过更早的待提交结果。
+    mutating func rewind(to threshold: Int) {
+        for id in results.keys where id >= threshold {
+            results.removeValue(forKey: id)
+        }
+        nextID = min(nextID, threshold)
+    }
+
+    /// 检查指定 id 是否在缓冲中有结果（避免重提交）。
+    func hasResult(id: Int) -> Bool {
+        results.keys.contains(id)
+    }
+
+    mutating func reset() {
+        results.removeAll()
+        nextID = 0
+    }
+}
+
 // MARK: - App State
 
 @MainActor
@@ -134,16 +392,27 @@ final class AppState {
     let transcriber = SystemAudioTranscriber()
     let translationService = TranslationService()
 
-    /// 各语言已提交的文本长度（判断新文本）
-    private var committedLength = 0
+    /// 已提交的 finalized 文本前缀（用于识别修正检测与增量提交）
+    private var textTracker = CommittedTextTracker()
     /// 用于等用户停顿后再翻译
     private var debounceTask: Task<Void, Never>?
-    /// 保证多个完整句子按原始顺序完成翻译。
-    private var translationTask: Task<Void, Never>?
     /// 当前句子的滚动预翻译任务。
     private var previewTask: Task<Void, Never>?
     private var pendingPreviewText = ""
     private var previewEpoch = 0
+    /// 预览去重与冷却
+    private var lastPreviewSource = ""
+    private var lastPreviewStart: UInt64?
+
+    // MARK: 并发翻译
+    private let maxConcurrentTranslations = 3
+    private var translationQueue = TranslationQueue()
+    private var translationWorkers: [Task<Void, Never>] = []
+    private var translationBuffer = TranslationOrderBuffer()
+    private var nextTranslationID = 0
+    /// 翻译代次：识别回滚时递增，迟到/在途的旧代次请求在提交时被丢弃。
+    private var translationEpoch = 0
+
     /// 识别会话代次，用于忽略语言切换前的异步回调。
     private var sessionGeneration = 0
     /// 首次启动识别的单调时钟起点；语言切换继续沿用同一时间轴。
@@ -179,9 +448,9 @@ final class AppState {
         do {
             status = .listening
             isTranslating = true
-            committedLength = 0
-            translationTask?.cancel()
-            translationTask = nil
+            textTracker.reset()
+            stopTranslationWorkers()
+            startTranslationWorkers()
             resetPreviewState()
             floatingPanel.updateLive(text: "", langId: language)
 
@@ -322,27 +591,37 @@ final class AppState {
         let trimmed = update.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
-        let start = min(committedLength, trimmed.count)
-        let pending = String(trimmed.dropFirst(start))
+        // 只从“稳定”的 finalized 前缀提交；识别修正只会发生在 partial 尾巴上。
+        // 若 finalized 前缀被修订（非单调），pendingText 报告回滚，
+        // 先撤销对应的已显示/在途条目，再继续差分提交。
+        let stable = update.finalizedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pending = textTracker.pendingText(for: stable)
+        if pending.rolledBack {
+            performRollback(pending: pending, generation: generation)
+        }
+
+        // 回滚后 committed 已截断到 retainedCount，与 pending.text 的起点一致。
+        let baseOffset = textTracker.committed.count
 
         let sentences: [CompletedSentence]
         let consumed: Int
         if force {
-            let remainder = pending.trimmingCharacters(in: .whitespacesAndNewlines)
+            let remainder = pending.text.trimmingCharacters(in: .whitespacesAndNewlines)
             sentences = remainder.isEmpty ? [] : [
-                CompletedSentence(text: remainder, startOffset: 0, endOffset: pending.count),
+                CompletedSentence(text: remainder, startOffset: 0, endOffset: pending.text.count),
             ]
-            consumed = pending.count
+            consumed = pending.text.count
         } else {
-            (sentences, consumed) = completeSentences(in: pending)
+            (sentences, consumed) = completeSentences(in: pending.text)
         }
 
         if consumed > 0 {
-            committedLength = start + consumed
+            textTracker.commitConsumedText(String(pending.text.prefix(consumed)))
             resetPreviewState()
         }
 
-        let liveStart = min(committedLength, trimmed.count)
+        // live 文本 = 全文去掉已提交前缀后的剩余（含尚未 final 的识别尾巴）
+        let liveStart = min(textTracker.committed.count, trimmed.count)
         let liveText = String(trimmed.dropFirst(liveStart))
             .trimmingCharacters(in: .whitespacesAndNewlines)
         floatingPanel.updateLive(text: liveText, langId: language)
@@ -352,48 +631,70 @@ final class AppState {
         for sentence in sentences {
             let timing = subtitleTiming(
                 fullTextLength: trimmed.count,
-                startOffset: start + sentence.startOffset,
-                endOffset: start + sentence.endOffset,
+                startOffset: baseOffset + sentence.startOffset,
+                endOffset: baseOffset + sentence.endOffset,
                 audioRange: update.audioRange,
                 sessionOffset: sessionOffset
             )
-            translateSource(
+            let id = nextTranslationID
+            nextTranslationID += 1
+            textTracker.registerLine(
+                text: sentence.text,
+                baseOffset: baseOffset,
+                sentenceStart: sentence.startOffset,
+                sentenceEnd: sentence.endOffset,
+                startTime: timing.start,
+                endTime: timing.end,
+                orderID: id
+            )
+            enqueueTranslation(
                 sentence.text,
                 startTime: timing.start,
                 endTime: timing.end,
-                generation: generation
+                generation: generation,
+                epoch: translationEpoch,
+                orderID: id
             )
         }
     }
 
-    private struct CompletedSentence {
-        let text: String
-        let startOffset: Int
-        let endOffset: Int
-    }
+    /// 识别器修订已 final 文本时的回滚：
+    /// 1) 递增翻译代次 → 在途/迟到的旧代次请求在提交时被丢弃；
+    /// 2) 回滚 tracker（截断 committed、移除超出共同前缀的行）；
+    /// 3) 撤销面板中对应的错误条目；
+    /// 4) 清理有序缓冲中 pending 的 stale 结果、重设 id 游标；
+    /// 5) 重提交“保留但未显示”的行（其翻译在途被丢弃，且缓冲中无结果）。
+    private func performRollback(pending: CommittedTextTracker.Pending, generation: Int) {
+        translationEpoch += 1
+        let epoch = translationEpoch
 
-    private func completeSentences(in text: String) -> (sentences: [CompletedSentence], consumed: Int) {
-        let terminators: Set<Character> = [".", "!", "?", "。", "！", "？", "\n"]
-        var sentences: [CompletedSentence] = []
-        var sentenceStart = text.startIndex
-        var consumed = 0
+        let rollbackInfo = textTracker.rollback(to: pending.retainedCount)
 
-        for index in text.indices where terminators.contains(text[index]) {
-            let sentenceEnd = text.index(after: index)
-            let sentence = String(text[sentenceStart..<sentenceEnd])
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !sentence.isEmpty {
-                sentences.append(.init(
-                    text: sentence,
-                    startOffset: text.distance(from: text.startIndex, to: sentenceStart),
-                    endOffset: text.distance(from: text.startIndex, to: sentenceEnd)
-                ))
-            }
-            consumed = text.distance(from: text.startIndex, to: sentenceEnd)
-            sentenceStart = sentenceEnd
+        let staleIDs = rollbackInfo.staleLines.map(\.orderID)
+        if !staleIDs.isEmpty {
+            floatingPanel.removeEntries(withOrderIDs: Set(staleIDs))
         }
 
-        return (sentences, consumed)
+        // 有序缓冲：丢弃 id >= k 的 pending 结果；新提交从 id k 开始续用。
+        let k = rollbackInfo.staleLines.first?.orderID ?? nextTranslationID
+        translationBuffer.rewind(to: k)
+        nextTranslationID = k
+
+        // 保留但未显示的行：其翻译要么在队列/在途（会被 epoch 丢弃），
+        // 要么已在缓冲中（正好被保留）。只重提交前者。
+        for line in rollbackInfo.retainedUndisplayed
+        where !translationBuffer.hasResult(id: line.orderID) {
+            enqueueTranslation(
+                line.text,
+                startTime: line.startTime,
+                endTime: line.endTime,
+                generation: generation,
+                epoch: epoch,
+                orderID: line.orderID
+            )
+        }
+
+        resetPreviewState()
     }
 
     private func subtitleTiming(
@@ -422,10 +723,22 @@ final class AppState {
 
     private func schedulePreview(language: String, generation: Int) {
         guard previewTask == nil, !pendingPreviewText.isEmpty else { return }
+        // 去重：与上次预览源相同则不重复请求
+        guard pendingPreviewText != lastPreviewSource else { return }
+        // 太短的文本不值得启动一次子进程翻译
+        guard pendingPreviewText.count >= 2 else { return }
+        // 冷却：限制预览翻译频率，正式翻译会兜底
+        let now = DispatchTime.now().uptimeNanoseconds
+        if let last = lastPreviewStart, now - last < 4_000_000_000 {
+            return
+        }
 
         let epoch = previewEpoch
+        lastPreviewSource = pendingPreviewText
+        lastPreviewStart = now
         previewTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(500))
+            // 稳定等待：短促话语在停顿后会被正式提交，不再发起预览请求
+            try? await Task.sleep(for: .milliseconds(800))
             guard !Task.isCancelled, let self else { return }
 
             let source = self.pendingPreviewText
@@ -477,8 +790,7 @@ final class AppState {
         transcriber.stop()
         debounceTask?.cancel()
         debounceTask = nil
-        translationTask?.cancel()
-        translationTask = nil
+        stopTranslationWorkers()
         resetPreviewState()
         isTranslating = false
         status = .idle
@@ -487,57 +799,108 @@ final class AppState {
         floatingPanel.hide()
     }
 
-    private func translateSource(
+    // MARK: - 并发翻译
+
+    private func startTranslationWorkers() {
+        translationQueue = TranslationQueue()
+        for _ in 0..<maxConcurrentTranslations {
+            translationWorkers.append(Task { [weak self] in
+                while let self, !Task.isCancelled {
+                    guard let request = await self.translationQueue.next() else { break }
+                    guard !Task.isCancelled else { break }
+                    guard let entry = await self.performTranslation(of: request) else { continue }
+                    self.commitTranslation(entry, id: request.id, generation: request.generation, epoch: request.epoch)
+                }
+            })
+        }
+    }
+
+    private func stopTranslationWorkers() {
+        for worker in translationWorkers {
+            worker.cancel()
+        }
+        translationWorkers.removeAll()
+        translationQueue.close()
+        translationQueue = TranslationQueue()
+        translationBuffer.reset()
+        nextTranslationID = 0
+        translationEpoch += 1
+    }
+
+    /// 将一句完成的句子送入有界并发翻译队列。结果按原始顺序追加到悬浮窗。
+    /// - Parameters:
+    ///   - orderID: 指定请求 id（用于回滚后保留行重提交，保持 id 索引不变）。
+    ///     未指定时使用 nextTranslationID 自增。
+    ///   - epoch: 翻译代次；默认为当前 translationEpoch。
+    private func enqueueTranslation(
         _ text: String,
         startTime: TimeInterval,
         endTime: TimeInterval,
-        generation: Int
+        generation: Int,
+        epoch: Int,
+        orderID: Int? = nil
     ) {
-        let previousTask = translationTask
-        translationTask = Task { [weak self] in
-            await previousTask?.value
-            guard !Task.isCancelled, let self else { return }
-
-            do {
-                if let result = try await translationService.translate(text) {
-                    await MainActor.run {
-                        guard generation == self.sessionGeneration else { return }
-                        self.floatingPanel.append(entry: .init(
-                            source: text,
-                            target: result,
-                            startTime: startTime,
-                            endTime: endTime
-                        ))
-                        self.canExport = true
-                    }
-                } else {
-                    // 翻译返回空，追加原文并标记失败
-                    await MainActor.run {
-                        guard generation == self.sessionGeneration else { return }
-                        self.floatingPanel.append(entry: .init(
-                            source: text,
-                            target: "⚠️ 翻译失败（无结果）",
-                            startTime: startTime,
-                            endTime: endTime
-                        ))
-                        self.canExport = true
-                    }
-                }
-            } catch {
-                // 翻译失败：仍追加原文，让历史保留、可滚动，并显示错误原因
-                let errMsg = error.localizedDescription
-                await MainActor.run {
-                    guard generation == self.sessionGeneration else { return }
-                    self.floatingPanel.append(entry: .init(
-                        source: text,
-                        target: "⚠️ 翻译失败: \(errMsg)",
-                        startTime: startTime,
-                        endTime: endTime
-                    ))
-                    self.canExport = true
-                }
-            }
+        let id: Int
+        if let orderID {
+            id = orderID
+        } else {
+            id = nextTranslationID
+            nextTranslationID += 1
         }
+        translationQueue.enqueue(.init(
+            id: id,
+            text: text,
+            startTime: startTime,
+            endTime: endTime,
+            generation: generation,
+            epoch: epoch
+        ))
+    }
+
+    private func performTranslation(of request: TranslationRequest) async -> TranslationEntry? {
+        do {
+            if let result = try await translationService.translate(request.text) {
+                return .init(
+                    orderID: request.id,
+                    source: request.text,
+                    target: result,
+                    startTime: request.startTime,
+                    endTime: request.endTime
+                )
+            }
+            // 翻译返回空，追加原文并标记失败
+            return .init(
+                orderID: request.id,
+                source: request.text,
+                target: "⚠️ 翻译失败（无结果）",
+                startTime: request.startTime,
+                endTime: request.endTime
+            )
+        } catch is CancellationError {
+            return nil
+        } catch {
+            // 翻译失败：仍追加原文，让历史保留、可滚动，并显示错误原因
+            return .init(
+                orderID: request.id,
+                source: request.text,
+                target: "⚠️ 翻译失败: \(error.localizedDescription)",
+                startTime: request.startTime,
+                endTime: request.endTime
+            )
+        }
+    }
+
+    private func commitTranslation(_ entry: TranslationEntry, id: Int, generation: Int, epoch: Int) {
+        guard generation == sessionGeneration else { return }
+        // 回滚（或会话重启）后，旧代次的迟到/在途结果直接丢弃。
+        guard epoch == translationEpoch else { return }
+        let ready = translationBuffer.commit(entry, id: id)
+        guard !ready.isEmpty else { return }
+        for entry in ready {
+            floatingPanel.append(entry: entry)
+            textTracker.markAppended(orderID: entry.orderID)
+        }
+        canExport = true
     }
 
     func selectLanguage(_ id: String) {

@@ -1,12 +1,26 @@
 import AVFoundation
 import CoreMedia
+import os
 import ScreenCaptureKit
 import Speech
+import Synchronization
 
 struct TimedTranscriptUpdate: Sendable {
     let text: String
+    let finalizedText: String
     let isPartial: Bool
     let audioRange: CMTimeRange
+    /// 该更新是否为识别器修订已 final 结果后的拼接替换结果。
+    /// 默认为 false，仅当 volatileRangeChangedHandler 触发且检测到范围重叠时设为 true。
+    let isRevision: Bool
+
+    init(text: String, finalizedText: String, isPartial: Bool, audioRange: CMTimeRange, isRevision: Bool = false) {
+        self.text = text
+        self.finalizedText = finalizedText
+        self.isPartial = isPartial
+        self.audioRange = audioRange
+        self.isRevision = isRevision
+    }
 }
 
 struct LanguageAssetState: Identifiable, Equatable, Sendable {
@@ -14,6 +28,85 @@ struct LanguageAssetState: Identifiable, Equatable, Sendable {
     let label: String
     let isInstalled: Bool
     let isReserved: Bool
+}
+
+/// 检查两个 CMTimeRange 是否有重叠（非零长度相交）。
+/// CMTimeRange 没有原生 overlaps 方法，故用比较函数。
+private func rangesOverlap(_ lhs: CMTimeRange, _ rhs: CMTimeRange) -> Bool {
+    guard lhs.isValid, rhs.isValid,
+          lhs.duration.seconds > 0, rhs.duration.seconds > 0 else {
+        return false
+    }
+    let lhsStart = CMTimeGetSeconds(lhs.start)
+    let lhsEnd = CMTimeGetSeconds(CMTimeRangeGetEnd(lhs))
+    let rhsStart = CMTimeGetSeconds(rhs.start)
+    let rhsEnd = CMTimeGetSeconds(CMTimeRangeGetEnd(rhs))
+    return lhsStart < rhsEnd && rhsStart < lhsEnd
+}
+
+/// 已 final 化的音频段 → finalizedText 文本偏移映射。
+/// 用于识别器修订已 final 结果时定位拼接位置（volatileRangeChangedHandler）。
+/// 正常增量模型下各段互不重叠，findSplice 不会被触发。
+final class SegmentTable: @unchecked Sendable {
+    /// 一段 final 结果：范围 + 其在 finalizedText 中的文本偏移/长度。
+    struct Segment: Sendable {
+        let range: CMTimeRange
+        let textStart: Int
+        let textLen: Int
+    }
+
+    private struct State {
+        var segments: [Segment] = []
+        var volatileRanges: [CMTimeRange] = []
+    }
+
+    private let lock = Mutex(State())
+
+    /// 记录一段正常追加的 final。
+    func append(range: CMTimeRange, text: String, textOffset: Int) {
+        lock.withLock { state in
+            state.segments.append(SegmentTable.Segment(range: range, textStart: textOffset, textLen: text.count))
+        }
+    }
+
+    /// 记录识别器标记为“易变/即将修订”的音频范围。
+    func markVolatile(_ range: CMTimeRange) {
+        lock.withLock { state in
+            state.volatileRanges.append(range)
+        }
+    }
+
+    /// 若存在与指定范围重叠的 volatile 标记，则消费该标记并返回 true。
+    func consumeVolatile(overlapping range: CMTimeRange) -> Bool {
+        lock.withLock { state in
+            guard let index = state.volatileRanges.firstIndex(where: { rangesOverlap($0, range) }) else {
+                return false
+            }
+            state.volatileRanges.remove(at: index)
+            return true
+        }
+    }
+
+    /// 查找与范围重叠的已 final 段，返回拼接位置（offset, 被替换总长度），
+    /// 并移除这些段（随后由调用方插入修订后的新段）。
+    func findSplice(for range: CMTimeRange) -> (offset: Int, oldLen: Int)? {
+        lock.withLock { state in
+            let overlapping = state.segments.filter { rangesOverlap($0.range, range) }
+            guard let first = overlapping.min(by: { $0.textStart < $1.textStart }) else {
+                return nil
+            }
+            let oldLen = overlapping.reduce(into: 0) { $0 += $1.textLen }
+            state.segments.removeAll { rangesOverlap($0.range, range) }
+            return (first.textStart, oldLen)
+        }
+    }
+
+    func reset() {
+        lock.withLock { state in
+            state.segments.removeAll()
+            state.volatileRanges.removeAll()
+        }
+    }
 }
 
 /// 捕获系统音频，并使用 macOS 26 的 SpeechAnalyzer 实时识别。
@@ -55,6 +148,19 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
     private var inputBuilder: AsyncStream<AnalyzerInput>.Continuation?
     private var resultTask: Task<Void, Never>?
     private var activeSessionID: UUID?
+    /// 已 final 音频段 → 文本偏移映射（识别器修订检测用）
+    private let segmentTable = SegmentTable()
+    /// 段级诊断日志开关：defaults write com.rtt.RTT DebugSegmentTable 1
+    private static var debugSegmentTable: Bool {
+        UserDefaults.standard.bool(forKey: "DebugSegmentTable")
+    }
+    /// 段级诊断日志（仅 DebugSegmentTable 开启时记录，便于真机确认引擎范围语义）
+    private static let segmentLogger = Logger(subsystem: "com.rtt.transcriber", category: "segments")
+
+    private static func logSegmentEvent(_ message: String) {
+        guard debugSegmentTable else { return }
+        segmentLogger.debug("\(message, privacy: .public)")
+    }
 
     // MARK: - 音频流
 
@@ -282,13 +388,24 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
         let sessionID = UUID()
         activeSessionID = sessionID
         isRunning = true
+        segmentTable.reset()
 
         guard let transcriber = await Self.makeTranscriber(locale: locale) else {
             clearSession(ifMatching: sessionID)
             throw TranscriberError.recognizerNotAvailable(locale.identifier)
         }
 
-        let analyzer = SpeechAnalyzer(modules: [transcriber.module])
+        // 识别器修订已报告音频范围时（volatile results），标记该范围，
+        // 供 consume*Results 在下一个重叠 final 到达时做拼接替换。
+        // 注意：只有 inputSequence: 这个 init 支持 volatileRangeChangedHandler。
+        let (inputSequence, inputBuilder) = AsyncStream<AnalyzerInput>.makeStream()
+        let analyzer = SpeechAnalyzer(
+            inputSequence: inputSequence,
+            modules: [transcriber.module],
+            volatileRangeChangedHandler: { [weak self] range, _, _ in
+                self?.segmentTable.markVolatile(range)
+            }
+        )
         guard let analyzerFormat = await SpeechAnalyzer.bestAvailableAudioFormat(
             compatibleWith: [transcriber.module]
         ) else {
@@ -296,7 +413,6 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
             throw TranscriberError.languageModelNotInstalled(locale.identifier)
         }
 
-        let (inputSequence, inputBuilder) = AsyncStream<AnalyzerInput>.makeStream()
         self.analyzer = analyzer
         self.analyzerFormat = analyzerFormat
         self.inputBuilder = inputBuilder
@@ -417,13 +533,50 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
                 guard activeSessionID == sessionID else { return }
                 let text = String(result.text.characters)
                 let fullRange = combinedRange(finalizedRange, result.range)
+
+                Self.logSegmentEvent(
+                    "speech isFinal=\(result.isFinal) range=\(String(describing: result.range)) " +
+                    "text=\"\(text)\" finalizedLen=\(finalizedText.count)"
+                )
+
                 if result.isFinal {
-                    finalizedText += text
+                    let revision = segmentTable.consumeVolatile(overlapping: result.range)
+                    if revision {
+                        let oldLenBefore = finalizedText.count
+                        if let splice = segmentTable.findSplice(for: result.range) {
+                            finalizedText = String(finalizedText.prefix(splice.offset))
+                                + text
+                                + String(finalizedText.dropFirst(splice.offset + splice.oldLen))
+                            Self.logSegmentEvent(
+                                "speech REVISION splice offset=\(splice.offset) " +
+                                "oldLen=\(splice.oldLen) newLen=\(text.count) " +
+                                "oldTotal=\(oldLenBefore) newTotal=\(finalizedText.count)"
+                            )
+                        } else {
+                            finalizedText += text
+                            Self.logSegmentEvent("speech REVISION no-splice fallback append")
+                        }
+                    } else {
+                        finalizedText += text
+                    }
+
                     finalizedRange = fullRange
-                    onTranscript?(.init(text: finalizedText, isPartial: false, audioRange: fullRange))
+                    segmentTable.append(
+                        range: result.range,
+                        text: text,
+                        textOffset: finalizedText.count - text.count
+                    )
+                    onTranscript?(.init(
+                        text: finalizedText,
+                        finalizedText: finalizedText,
+                        isPartial: false,
+                        audioRange: fullRange,
+                        isRevision: revision
+                    ))
                 } else {
                     onTranscript?(.init(
                         text: finalizedText + text,
+                        finalizedText: finalizedText,
                         isPartial: true,
                         audioRange: fullRange
                     ))
@@ -448,13 +601,50 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
                 guard activeSessionID == sessionID else { return }
                 let text = String(result.text.characters)
                 let fullRange = combinedRange(finalizedRange, result.range)
+
+                Self.logSegmentEvent(
+                    "dictation isFinal=\(result.isFinal) range=\(String(describing: result.range)) " +
+                    "text=\"\(text)\" finalizedLen=\(finalizedText.count)"
+                )
+
                 if result.isFinal {
-                    finalizedText += text
+                    let revision = segmentTable.consumeVolatile(overlapping: result.range)
+                    if revision {
+                        let oldLenBefore = finalizedText.count
+                        if let splice = segmentTable.findSplice(for: result.range) {
+                            finalizedText = String(finalizedText.prefix(splice.offset))
+                                + text
+                                + String(finalizedText.dropFirst(splice.offset + splice.oldLen))
+                            Self.logSegmentEvent(
+                                "dictation REVISION splice offset=\(splice.offset) " +
+                                "oldLen=\(splice.oldLen) newLen=\(text.count) " +
+                                "oldTotal=\(oldLenBefore) newTotal=\(finalizedText.count)"
+                            )
+                        } else {
+                            finalizedText += text
+                            Self.logSegmentEvent("dictation REVISION no-splice fallback append")
+                        }
+                    } else {
+                        finalizedText += text
+                    }
+
                     finalizedRange = fullRange
-                    onTranscript?(.init(text: finalizedText, isPartial: false, audioRange: fullRange))
+                    segmentTable.append(
+                        range: result.range,
+                        text: text,
+                        textOffset: finalizedText.count - text.count
+                    )
+                    onTranscript?(.init(
+                        text: finalizedText,
+                        finalizedText: finalizedText,
+                        isPartial: false,
+                        audioRange: fullRange,
+                        isRevision: revision
+                    ))
                 } else {
                     onTranscript?(.init(
                         text: finalizedText + text,
+                        finalizedText: finalizedText,
                         isPartial: true,
                         audioRange: fullRange
                     ))

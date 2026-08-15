@@ -1,9 +1,149 @@
 import AppKit
 import SwiftUI
 
+enum PanelResizeCorner {
+    case topLeft, topRight, bottomLeft, bottomRight
+}
+
+private final class PanelResizeHandle: NSView {
+    private let corner: PanelResizeCorner
+
+    init(corner: PanelResizeCorner) {
+        self.corner = corner
+        super.init(frame: .zero)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func resetCursorRects() {
+        let position: NSCursor.FrameResizePosition = switch corner {
+        case .topLeft: .topLeft
+        case .topRight: .topRight
+        case .bottomLeft: .bottomLeft
+        case .bottomRight: .bottomRight
+        }
+        addCursorRect(
+            bounds,
+            cursor: NSCursor.frameResize(position: position, directions: [.inward, .outward])
+        )
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let window else { return }
+
+        let startFrame = window.frame
+        let startMouseLocation = NSEvent.mouseLocation
+
+        while let nextEvent = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            if nextEvent.type == .leftMouseUp {
+                break
+            }
+            resize(
+                window: window,
+                startFrame: startFrame,
+                startMouseLocation: startMouseLocation,
+                mouseLocation: NSEvent.mouseLocation
+            )
+        }
+    }
+
+    private func resize(
+        window: NSWindow,
+        startFrame: NSRect,
+        startMouseLocation: NSPoint,
+        mouseLocation: NSPoint
+    ) {
+        let deltaX = mouseLocation.x - startMouseLocation.x
+        let deltaY = mouseLocation.y - startMouseLocation.y
+        let minimumSize = window.minSize
+        var frame = startFrame
+
+        switch corner {
+        case .topLeft:
+            frame.size.width = max(minimumSize.width, startFrame.width - deltaX)
+            frame.origin.x = startFrame.maxX - frame.width
+            frame.size.height = max(minimumSize.height, startFrame.height + deltaY)
+        case .topRight:
+            frame.size.width = max(minimumSize.width, startFrame.width + deltaX)
+            frame.size.height = max(minimumSize.height, startFrame.height + deltaY)
+        case .bottomLeft:
+            frame.size.width = max(minimumSize.width, startFrame.width - deltaX)
+            frame.origin.x = startFrame.maxX - frame.width
+            frame.size.height = max(minimumSize.height, startFrame.height - deltaY)
+            frame.origin.y = startFrame.maxY - frame.height
+        case .bottomRight:
+            frame.size.width = max(minimumSize.width, startFrame.width + deltaX)
+            frame.size.height = max(minimumSize.height, startFrame.height - deltaY)
+            frame.origin.y = startFrame.maxY - frame.height
+        }
+
+        window.setFrame(frame, display: true)
+    }
+}
+
+private final class PanelContentView<Content: View>: NSView {
+    private let hostingView: NSHostingView<Content>
+    private let topLeftHandle = PanelResizeHandle(corner: .topLeft)
+    private let topRightHandle = PanelResizeHandle(corner: .topRight)
+    private let bottomLeftHandle = PanelResizeHandle(corner: .bottomLeft)
+    private let bottomRightHandle = PanelResizeHandle(corner: .bottomRight)
+
+    override var isFlipped: Bool { true }
+
+    init(hostingView: NSHostingView<Content>) {
+        self.hostingView = hostingView
+        super.init(frame: .zero)
+        addSubview(hostingView)
+        addSubview(topLeftHandle)
+        addSubview(topRightHandle)
+        addSubview(bottomLeftHandle)
+        addSubview(bottomRightHandle)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func layout() {
+        super.layout()
+        hostingView.frame = bounds
+
+        let gripSize: CGFloat = 24
+        topLeftHandle.frame = NSRect(x: 0, y: 0, width: gripSize, height: gripSize)
+        topRightHandle.frame = NSRect(
+            x: bounds.width - gripSize,
+            y: 0,
+            width: gripSize,
+            height: gripSize
+        )
+        bottomLeftHandle.frame = NSRect(
+            x: 0,
+            y: bounds.height - gripSize,
+            width: gripSize,
+            height: gripSize
+        )
+        bottomRightHandle.frame = NSRect(
+            x: bounds.width - gripSize,
+            y: bounds.height - gripSize,
+            width: gripSize,
+            height: gripSize
+        )
+    }
+}
+
 /// 一条翻译记录：原文 + 译文
 struct TranslationEntry: Identifiable, Equatable {
     let id = UUID()
+    /// 提交顺序号（对应翻译请求 id，用于回滚定位）
+    let orderID: Int
     var source: String
     var target: String
     var startTime: TimeInterval = 0
@@ -15,6 +155,11 @@ struct TranslationEntry: Identifiable, Equatable {
 final class FloatingPanelManager {
     private var panel: NSPanel?
     private var hostingView: NSHostingView<TranscriptView>?
+
+    /// 高频实时更新节流（合并每 120ms 窗口内的多次变更）。
+    private var liveUpdateTask: Task<Void, Never>?
+    private var liveUpdatePending = false
+    private let liveUpdateInterval: Duration = .milliseconds(120)
 
     /// 翻译历史
     var entries: [TranslationEntry] = []
@@ -51,14 +196,22 @@ final class FloatingPanelManager {
             onToggleOriginal: onToggleOriginal ?? {}
         )
         let hosting = NSHostingView(rootView: view)
+        let contentView = PanelContentView(hostingView: hosting)
         hostingView = hosting
 
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 420, height: 320),
-            styleMask: [.resizable, .borderless, .nonactivatingPanel],
+            styleMask: [.titled, .resizable, .fullSizeContentView, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.titlebarSeparatorStyle = .none
+        panel.standardWindowButton(.closeButton)?.isHidden = true
+        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        panel.standardWindowButton(.zoomButton)?.isHidden = true
+        panel.minSize = NSSize(width: 260, height: 160)
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.isOpaque = false
@@ -67,7 +220,7 @@ final class FloatingPanelManager {
         panel.isFloatingPanel = true
         panel.isMovableByWindowBackground = true
         panel.hidesOnDeactivate = false
-        panel.contentView = hosting
+        panel.contentView = contentView
 
         // 默认放右边中间
         if let screen = NSScreen.main {
@@ -82,8 +235,31 @@ final class FloatingPanelManager {
         panel.orderFront(nil)
     }
 
-    /// 更新整个视图状态。
+    /// 立即重建整个视图（用于结构性变更，如追加条目、切换原文/译文）。
     func update() {
+        performUpdate()
+    }
+
+    /// 高频实时更新走节流：窗口期内合并所有变更，最多每 120ms 渲染一次。
+    private func scheduleUpdate() {
+        liveUpdatePending = true
+        guard liveUpdateTask == nil else { return }
+        liveUpdateTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(120))
+                guard !Task.isCancelled else { return }
+                self.liveUpdatePending = false
+                self.performUpdate()
+                if !self.liveUpdatePending {
+                    self.liveUpdateTask = nil
+                    return
+                }
+            }
+        }
+    }
+
+    private func performUpdate() {
         hostingView?.rootView = TranscriptView(
             entries: entries,
             provisionalEntry: provisionalEntry,
@@ -103,6 +279,12 @@ final class FloatingPanelManager {
         update()
     }
 
+    /// 删除指定 orderID 的条目（用于回滚时撤销错误字幕）。
+    func removeEntries(withOrderIDs stale: Set<Int>) {
+        entries.removeAll { stale.contains($0.orderID) }
+        update()
+    }
+
     /// 更新正在识别句子的临时翻译，始终复用同一张卡片。
     func updateProvisional(source: String, target: String) {
         if var entry = provisionalEntry {
@@ -110,9 +292,9 @@ final class FloatingPanelManager {
             entry.target = target
             provisionalEntry = entry
         } else {
-            provisionalEntry = TranslationEntry(source: source, target: target)
+            provisionalEntry = TranslationEntry(orderID: 0, source: source, target: target)
         }
-        update()
+        scheduleUpdate()
     }
 
     func clearProvisional() {
@@ -129,11 +311,11 @@ final class FloatingPanelManager {
         update()
     }
 
-    /// 更新实时识别原文（未完成句子）。
+    /// 更新实时识别原文（未完成句子）。高频调用，走节流合并渲染。
     func updateLive(text: String, langId: String = "") {
         liveText = text
         if !langId.isEmpty { liveLangId = langId }
-        update()
+        scheduleUpdate()
     }
 
     func hide() {
