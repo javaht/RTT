@@ -19,6 +19,7 @@ mkdir -p "$RTT_CONTENTS_DIR/MacOS" "$RTT_CONTENTS_DIR/Resources"
 cp "$RTT_BIN_DIR/RTT" "$RTT_CONTENTS_DIR/MacOS/RTT"
 cp "$RTT_PROJECT_DIR/Packaging/Info.plist" "$RTT_CONTENTS_DIR/Info.plist"
 cp -R "$RTT_BIN_DIR/RTT_RTT.bundle/Resources/." "$RTT_CONTENTS_DIR/Resources/"
+"$RTT_PROJECT_DIR/scripts/install-app-icon.sh" "$RTT_CONTENTS_DIR"
 chmod +x "$RTT_CONTENTS_DIR/MacOS/RTT" "$RTT_CONTENTS_DIR/Resources/trans" "$RTT_CONTENTS_DIR/Resources/gawk"
 
 RTT_SIGNING_IDENTITY=${SIGNING_IDENTITY:-}

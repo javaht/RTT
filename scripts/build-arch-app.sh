@@ -42,6 +42,7 @@ mkdir -p "$RTT_CONTENTS_DIR/MacOS" "$RTT_RESOURCES_DIR" "$RTT_FRAMEWORKS_DIR"
 cp "$RTT_BIN_DIR/RTT" "$RTT_CONTENTS_DIR/MacOS/RTT"
 cp "$RTT_PROJECT_DIR/Packaging/Info.plist" "$RTT_CONTENTS_DIR/Info.plist"
 cp -R "$RTT_BIN_DIR/RTT_RTT.bundle/Resources/." "$RTT_RESOURCES_DIR/"
+"$RTT_PROJECT_DIR/scripts/install-app-icon.sh" "$RTT_CONTENTS_DIR"
 
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $RTT_VERSION" "$RTT_CONTENTS_DIR/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $RTT_BUILD_NUMBER" "$RTT_CONTENTS_DIR/Info.plist"
