@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>RTT · Real Time Translate — 实时双语字幕</title>
+<meta name="description" content="RTT 是一款面向 Mac 视频观看场景的实时双语字幕工具:捕获系统音频,Apple SpeechAnalyzer 端侧识别,Bing 翻译,置顶悬浮窗显示。" />
+<style>
+  :root{
+    /* 米白纸感底色 */
+    --bg-0:#f5f1e8;
+    --bg-1:#faf6ee;
+    --bg-2:#efe9db;
+    --bg-3:#e6dfcd;
+    /* 深棕文字系 */
+    --ink-0:#2b2018;
+    --ink-1:#463729;
+    --ink-2:#6b5a47;
+    --ink-3:#9a8a73;
+    /* 香槟银强调 */
+    --silver:#b8a888;
+    --silver-2:#a89878;
+    --silver-soft:#d8ccb4;
+    --silver-deep:#8a7c63;
+    /* 暖金点缀(克制) */
+    --gold:#c4a26a;
+    --line:rgba(107,90,71,.16);
+    --line-2:rgba(107,90,71,.28);
+    --card:#ffffff;
+    --glass:rgba(255,255,255,.72);
+    --radius:18px;
+    --shadow:0 24px 50px -22px rgba(70,55,40,.22);
+    --shadow-sm:0 8px 24px -12px rgba(70,55,40,.18);
+    --ease:cubic-bezier(.2,.7,.2,1);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Helvetica Neue",Arial,sans-serif;
+    color:var(--ink-1);
+    background:var(--bg-0);
+    line-height:1.65;
+    -webkit-font-smoothing:antialiased;
+    overflow-x:hidden;
+  }
+  /* 纸感纹理 + 暖光氛围 */
+  body::before{
+    content:"";
+    position:fixed;inset:0;z-index:-2;
+    background:
+      radial-gradient(900px 620px at 14% -10%, rgba(196,162,106,.16), transparent 60%),
+      radial-gradient(780px 500px at 90% 4%, rgba(184,168,136,.14), transparent 62%),
+      radial-gradient(1200px 700px at 50% 112%, rgba(200,150,95,.10), transparent 60%),
+      linear-gradient(180deg, var(--bg-1) 0%, var(--bg-0) 100%);
+  }
+  /* 极淡纸纹噪点 */
+  body::after{
+    content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;opacity:.5;
+    background-image:radial-gradient(circle at 1px 1px, rgba(107,90,71,.06) 1px, transparent 0);
+    background-size:24px 24px;
+  }
+  .wrap{max-width:1120px;margin:0 auto;padding:0 24px}
+
+  /* 顶栏 */
+  nav{
+    position:sticky;top:0;z-index:50;
+    backdrop-filter:saturate(160%) blur(14px);
+    -webkit-backdrop-filter:saturate(160%) blur(14px);
+    background:rgba(250,246,238,.78);
+    border-bottom:1px solid var(--line);
+  }
+  nav .row{display:flex;align-items:center;justify-content:space-between;height:66px}
+  .brand{display:flex;align-items:center;gap:12px;text-decoration:none}
+  .brand .mark{width:30px;height:30px;border-radius:8px;overflow:hidden;box-shadow:var(--shadow-sm)}
+  .brand .mark svg{display:block;width:100%;height:100%}
+  .brand b{color:var(--ink-0);font-weight:700;letter-spacing:.04em}
+  .brand span{color:var(--ink-3);font-size:11px;letter-spacing:.2em;text-transform:uppercase}
+  nav .links{display:flex;gap:30px;align-items:center}
+  nav .links a{color:var(--ink-2);text-decoration:none;font-size:14px;transition:color .2s var(--ease)}
+  nav .links a:hover{color:var(--ink-0)}
+  .btn{
+    display:inline-flex;align-items:center;gap:8px;
+    padding:10px 18px;border-radius:12px;
+    font-size:14px;font-weight:600;text-decoration:none;cursor:pointer;
+    border:1px solid transparent;transition:transform .2s var(--ease), box-shadow .2s var(--ease), background .2s var(--ease);
+  }
+  .btn-primary{
+    color:#fbf8f0;
+    background:linear-gradient(180deg, var(--ink-0), var(--ink-1));
+    box-shadow:0 8px 22px -8px rgba(70,55,40,.4), inset 0 1px 0 rgba(255,255,255,.12);
+  }
+  .btn-primary:hover{transform:translateY(-2px);box-shadow:0 14px 30px -10px rgba(70,55,40,.5), inset 0 1px 0 rgba(255,255,255,.18)}
+  .btn-ghost{color:var(--ink-1);background:var(--glass);border-color:var(--line-2)}
+  .btn-ghost:hover{transform:translateY(-2px);border-color:var(--silver);background:#fff}
+
+  /* Hero */
+  header.hero{padding:120px 0 90px;position:relative}
+  .hero-grid{display:grid;grid-template-columns:1.15fr .85fr;gap:60px;align-items:center}
+  .pill{
+    display:inline-flex;align-items:center;gap:8px;
+    padding:6px 14px;border-radius:999px;font-size:12px;letter-spacing:.08em;
+    color:var(--ink-1);background:#fff;border:1px solid var(--line-2);
+    box-shadow:var(--shadow-sm);margin-bottom:24px;
+  }
+  .pill .dot{width:7px;height:7px;border-radius:50%;background:#7a9d6a;box-shadow:0 0 10px rgba(122,157,106,.6)}
+  h1{
+    font-size:clamp(46px,7vw,86px);line-height:1.02;font-weight:800;letter-spacing:-.02em;
+    color:var(--ink-0);
+    background:linear-gradient(180deg, #2b2018 0%, #5a4632 60%, #8a7c63 100%);
+    -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;
+    margin-bottom:8px;
+  }
+  .hero .sub{font-size:18px;color:var(--silver-deep);margin-bottom:14px;letter-spacing:.02em}
+  .hero .lede{font-size:17px;color:var(--ink-2);max-width:560px;margin-bottom:34px}
+  .hero .lede b{color:var(--ink-0);font-weight:600}
+  .hero-cta{display:flex;gap:14px;flex-wrap:wrap;align-items:center}
+  .hero-meta{display:flex;gap:26px;margin-top:38px;flex-wrap:wrap}
+  .hero-meta .m{display:flex;flex-direction:column;gap:2px}
+  .hero-meta .m b{font-size:22px;color:var(--ink-0);font-weight:700}
+  .hero-meta .m small{color:var(--ink-3);font-size:12px;letter-spacing:.06em}
+
+  /* Hero 视觉:模拟悬浮字幕窗 */
+  .stage{position:relative;height:420px}
+  .app-icon{
+    position:absolute;top:8px;right:18px;width:96px;height:96px;border-radius:24px;
+    box-shadow:0 30px 50px -18px rgba(70,55,40,.4), 0 0 0 1px rgba(184,168,136,.3);
+    transform:rotate(-6deg);
+  }
+  .app-icon svg{width:100%;height:100%;display:block}
+  .caption-card{
+    position:absolute;left:0;bottom:40px;width:100%;
+    background:linear-gradient(180deg, #ffffff, #f7f2e8);
+    border:1px solid var(--line-2);border-radius:16px;
+    padding:20px 22px;box-shadow:var(--shadow);
+  }
+  .caption-card .src{font-size:14px;color:var(--ink-3);margin-bottom:8px;font-family:"SF Mono",ui-monospace,Menlo,monospace}
+  .caption-card .tgt{font-size:20px;color:var(--ink-0);font-weight:600;line-height:1.4}
+  .caption-card .tgt .hl{color:var(--gold)}
+  .caption-card .bar{display:flex;align-items:center;gap:6px;margin-top:14px}
+  .caption-card .bar i{display:block;height:3px;border-radius:2px;background:var(--bg-3);flex:1}
+  .caption-card .bar i.on{background:linear-gradient(90deg, var(--silver-deep), transparent)}
+  .caption-card .tag{position:absolute;top:-12px;left:20px;font-size:11px;letter-spacing:.12em;color:var(--ink-2);background:#fff;padding:2px 10px;border:1px solid var(--line-2);border-radius:999px;text-transform:uppercase;box-shadow:var(--shadow-sm)}
+  .float-orb{
+    position:absolute;width:260px;height:260px;border-radius:50%;
+    background:radial-gradient(circle at 35% 30%, rgba(184,168,136,.3), transparent 60%);
+    filter:blur(20px);right:-40px;top:60px;z-index:-1;
+  }
+
+  /* Section 通用 */
+  section{padding:90px 0;position:relative}
+  .eyebrow{font-size:12px;letter-spacing:.22em;text-transform:uppercase;color:var(--silver-deep);margin-bottom:14px;font-weight:600}
+  .sec-title{font-size:clamp(30px,4vw,44px);color:var(--ink-0);font-weight:700;letter-spacing:-.01em;line-height:1.15;max-width:760px}
+  .sec-desc{color:var(--ink-2);font-size:17px;max-width:640px;margin-top:14px}
+
+  /* 特性网格 */
+  .features{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:48px}
+  .feature{
+    background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+    padding:26px 24px;transition:transform .25s var(--ease), border-color .25s var(--ease), box-shadow .25s var(--ease);
+    position:relative;overflow:hidden;box-shadow:var(--shadow-sm);
+  }
+  .feature::before{
+    content:"";position:absolute;inset:0;border-radius:inherit;opacity:0;transition:opacity .3s var(--ease);
+    background:radial-gradient(420px 160px at var(--mx,50%) 0%, rgba(184,168,136,.18), transparent 70%);
+  }
+  .feature:hover{transform:translateY(-4px);border-color:var(--silver);box-shadow:0 18px 40px -18px rgba(70,55,40,.28)}
+  .feature:hover::before{opacity:1}
+  .feature .ic{width:42px;height:42px;border-radius:11px;display:grid;place-items:center;margin-bottom:16px;
+    background:linear-gradient(180deg, #fff, var(--bg-2));border:1px solid var(--line-2);color:var(--silver-deep)}
+  .feature h3{font-size:17px;color:var(--ink-0);margin-bottom:8px;font-weight:600}
+  .feature p{font-size:14px;color:var(--ink-2);line-height:1.6}
+  .feature .ic svg{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+
+  /* 工作流 */
+  .flow{display:grid;grid-template-columns:repeat(4,1fr);gap:0;margin-top:48px;position:relative}
+  .flow-step{position:relative;padding:30px 24px 30px 0}
+  .flow-step .n{font-size:12px;color:var(--silver-deep);font-weight:700;letter-spacing:.12em;margin-bottom:10px;font-family:"SF Mono",ui-monospace,monospace}
+  .flow-step h4{color:var(--ink-0);font-size:18px;font-weight:600;margin-bottom:8px}
+  .flow-step p{color:var(--ink-2);font-size:14px}
+  .flow-step:not(:last-child)::after{
+    content:"";position:absolute;right:-12px;top:40px;width:24px;height:1px;
+    background:linear-gradient(90deg, var(--silver-deep), transparent);
+  }
+  .flow-step::before{content:"";position:absolute;left:0;top:0;bottom:0;width:1px;background:var(--line)}
+  .flow-step:first-child::before{display:none}
+
+  /* 语言云 */
+  .langs{display:flex;flex-wrap:wrap;gap:10px;margin-top:40px}
+  .lang{
+    padding:9px 16px;border-radius:999px;font-size:13px;color:var(--ink-1);
+    background:#fff;border:1px solid var(--line);box-shadow:var(--shadow-sm);
+    transition:all .2s var(--ease);
+  }
+  .lang:hover{color:var(--ink-0);border-color:var(--silver);transform:translateY(-2px);box-shadow:0 10px 22px -10px rgba(70,55,40,.25)}
+  .lang em{color:var(--ink-3);font-style:normal;font-size:11px;margin-left:6px}
+
+  /* 开始使用 */
+  .getstarted{display:grid;grid-template-columns:1fr 1fr;gap:40px;margin-top:48px;align-items:start}
+  .code-block{
+    background:#2b2018;border:1px solid var(--ink-1);border-radius:14px;overflow:hidden;box-shadow:var(--shadow);
+  }
+  .code-block .head{display:flex;align-items:center;gap:8px;padding:12px 16px;border-bottom:1px solid rgba(255,255,255,.08)}
+  .code-block .head i{width:11px;height:11px;border-radius:50%;display:block}
+  .code-block .head .r{background:#ff5f57}.code-block .head .y{background:#febc2e}.code-block .head .g{background:#7a9d6a}
+  .code-block .head .fn{margin-left:auto;color:rgba(255,255,255,.4);font-size:12px;font-family:"SF Mono",ui-monospace,monospace}
+  .code-block pre{padding:18px 20px;overflow-x:auto;font-family:"SF Mono",ui-monospace,Menlo,monospace;font-size:13.5px;line-height:1.7;color:#e6dfcd}
+  .code-block .c{color:rgba(255,255,255,.34)}
+  .code-block .k{color:#d8b878}
+  .code-block .s{color:#b5c8a0}
+  .code-block .t{color:#e6c79a}
+  .req-list{list-style:none;display:flex;flex-direction:column;gap:14px}
+  .req-list li{display:flex;gap:14px;align-items:flex-start;padding:16px 18px;background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow-sm)}
+  .req-list .ic{color:var(--silver-deep);margin-top:2px;flex-shrink:0}
+  .req-list .ic svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+  .req-list b{color:var(--ink-0);font-size:15px;display:block;margin-bottom:2px}
+  .req-list span{color:var(--ink-2);font-size:13.5px}
+
+  /* 隐私 */
+  .privacy{
+    margin-top:80px;padding:40px;border-radius:var(--radius);
+    background:linear-gradient(135deg, #ffffff, var(--bg-2));
+    border:1px solid var(--line-2);display:grid;grid-template-columns:auto 1fr;gap:28px;align-items:center;
+    box-shadow:var(--shadow-sm);
+  }
+  .privacy .ic{width:56px;height:56px;border-radius:14px;display:grid;place-items:center;
+    background:linear-gradient(180deg, rgba(122,157,106,.16), rgba(122,157,106,.05));border:1px solid rgba(122,157,106,.3);color:#5e7d50}
+  .privacy .ic svg{width:28px;height:28px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+  .privacy h3{color:var(--ink-0);font-size:20px;margin-bottom:6px}
+  .privacy p{color:var(--ink-2);font-size:15px}
+
+  /* CTA 底部 */
+  .cta-final{padding:110px 0;text-align:center;position:relative}
+  .cta-final h2{font-size:clamp(34px,5vw,56px);font-weight:800;letter-spacing:-.02em;
+    background:linear-gradient(180deg,#2b2018,#5a4632 60%,#8a7c63);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+  .cta-final p{color:var(--ink-2);font-size:17px;margin:18px auto 34px;max-width:520px}
+  .cta-final .row{display:flex;gap:14px;justify-content:center;flex-wrap:wrap}
+
+  footer{border-top:1px solid var(--line);padding:36px 0;background:var(--bg-1)}
+  footer .row{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:16px}
+  footer .copy{color:var(--ink-3);font-size:13px}
+  footer .links{display:flex;gap:22px}
+  footer .links a{color:var(--ink-2);text-decoration:none;font-size:13px;transition:color .2s var(--ease)}
+  footer .links a:hover{color:var(--ink-0)}
+
+  /* 进入动画 */
+  .reveal{opacity:0;transform:translateY(28px);transition:opacity .7s var(--ease), transform .7s var(--ease)}
+  .reveal.in{opacity:1;transform:none}
+
+  /* 响应式 */
+  @media (max-width:920px){
+    .hero-grid{grid-template-columns:1fr;gap:50px}
+    .stage{height:360px}
+    .features{grid-template-columns:1fr 1fr}
+    .flow{grid-template-columns:1fr 1fr}
+    .flow-step::after{display:none}
+    .getstarted{grid-template-columns:1fr}
+    nav .links{display:none}
+    .privacy{grid-template-columns:1fr;text-align:center}
+    .privacy .ic{margin:0 auto}
+  }
+  @media (max-width:560px){
+    .features{grid-template-columns:1fr}
+    .flow{grid-template-columns:1fr}
+    .flow-step{padding-right:0}
+    header.hero{padding:80px 0 60px}
+  }
+  @media (prefers-reduced-motion:reduce){
+    *{animation:none!important;transition:none!important}
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap row">
+    <a class="brand" href="#top">
+      <span class="mark">
+        <svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <defs>
+            <linearGradient id="bg" x1="50%" y1="0%" x2="50%" y2="100%"><stop offset="0%" stop-color="#1c2533"/><stop offset="100%" stop-color="#0a0f18"/></linearGradient>
+            <linearGradient id="metal" x1="50%" y1="0%" x2="50%" y2="100%"><stop offset="0%" stop-color="#e6f1f8"/><stop offset="60%" stop-color="#6f8ca3"/><stop offset="100%" stop-color="#41596e"/></linearGradient>
+          </defs>
+          <rect x="44" y="44" width="424" height="424" rx="100" fill="url(#bg)"/>
+          <g transform="translate(68,186)" fill="url(#metal)" fill-rule="evenodd">
+            <path d="M18,34 H38 V0 H88 C108,0 120,12 120,32 C120,49 108,60 92,65 L126,140 H98 L68,72 H38 V140 H18 Z M38,22 V52 H84 C94,52 100,46 100,37 C100,28 94,22 84,22 Z"/>
+            <g transform="translate(138,0)"><path d="M0,0 H106 V24 H65 V140 H41 V24 H0 Z"/></g>
+            <g transform="translate(262,0)"><path d="M0,0 H106 V24 H65 V140 H41 V24 H0 Z"/></g>
+          </g>
+        </svg>
+      </span>
+      <div>
+        <b>RTT</b><br/><span>Real Time Translate</span>
+      </div>
+    </a>
+    <div class="links">
+      <a href="#features">功能</a>
+      <a href="#flow">工作流</a>
+      <a href="#languages">语言</a>
+      <a href="#start">开始使用</a>
+      <a href="#privacy">隐私</a>
+    </div>
+    <a class="btn btn-primary" href="#start">立即体验</a>
+  </div>
+</nav>
+
+<header class="hero" id="top">
+  <div class="wrap hero-grid">
+    <div class="reveal">
+      <span class="pill"><span class="dot"></span> macOS 26 · Apple Silicon · 端侧识别</span>
+      <h1>实时双语字幕<br/>为看视频而生</h1>
+      <div class="sub">Real Time Translate</div>
+      <p class="lede">RTT 捕获 Mac 系统音频,用 <b>Apple SpeechAnalyzer</b> 在设备端识别外语语音,再经 <b>Bing</b> 翻译成简体中文,以置顶悬浮窗呈现双语字幕。YouTube、网课、播客、直播、本地播放器 —— 一个窗口,全程沉浸。</p>
+      <div class="hero-cta">
+        <a class="btn btn-primary" href="#start">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 4 20 12 6 20 6 4"/></svg>
+          开始使用
+        </a>
+        <a class="btn btn-ghost" href="#flow">了解工作流</a>
+      </div>
+      <div class="hero-meta">
+        <div class="m"><b>18+</b><small>识别语言</small></div>
+        <div class="m"><b>3 种</b><small>导出格式</small></div>
+        <div class="m"><b>0</b><small>音频留存</small></div>
+        <div class="m"><b>4 种</b><small>字幕样式</small></div>
+      </div>
+    </div>
+    <div class="stage reveal">
+      <div class="float-orb"></div>
+      <div class="app-icon">
+        <svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <defs>
+            <linearGradient id="bg2" x1="50%" y1="0%" x2="50%" y2="100%"><stop offset="0%" stop-color="#1c2533"/><stop offset="35%" stop-color="#141c28"/><stop offset="100%" stop-color="#0a0f18"/></linearGradient>
+            <linearGradient id="metal2" x1="50%" y1="0%" x2="50%" y2="100%"><stop offset="0%" stop-color="#e6f1f8"/><stop offset="20%" stop-color="#bfd8ea"/><stop offset="60%" stop-color="#6f8ca3"/><stop offset="100%" stop-color="#41596e"/></linearGradient>
+            <radialGradient id="vig2" cx="50%" cy="35%" r="65%"><stop offset="0%" stop-color="#2a3c52" stop-opacity=".45"/><stop offset="100%" stop-color="#070c14" stop-opacity=".85"/></radialGradient>
+          </defs>
+          <rect x="44" y="44" width="424" height="424" rx="100" fill="url(#bg2)" stroke="#3d4f66" stroke-opacity=".8" stroke-width="2.5"/>
+          <rect x="44" y="44" width="424" height="424" rx="100" fill="url(#vig2)"/>
+          <g transform="translate(68,186)" fill="url(#metal2)" fill-rule="evenodd">
+            <path d="M18,34 H38 V0 H88 C108,0 120,12 120,32 C120,49 108,60 92,65 L126,140 H98 L68,72 H38 V140 H18 Z M38,22 V52 H84 C94,52 100,46 100,37 C100,28 94,22 84,22 Z"/>
+            <g transform="translate(138,0)"><path d="M0,0 H106 V24 H65 V140 H41 V24 H0 Z"/></g>
+            <g transform="translate(262,0)"><path d="M0,0 H106 V24 H65 V140 H41 V24 H0 Z"/></g>
+          </g>
+        </svg>
+      </div>
+      <div class="caption-card">
+        <span class="tag">悬浮字幕 · 置顶</span>
+        <div class="src">This is the golden age of people who build things.</div>
+        <div class="tgt">这是属于<span class="hl">创造者</span>的黄金时代。</div>
+        <div class="bar"><i class="on"></i><i class="on"></i><i class="on"></i><i></i></div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<section id="features">
+  <div class="wrap">
+    <div class="reveal">
+      <div class="eyebrow">Features</div>
+      <h2 class="sec-title">不止是翻译,是一套完整的字幕工作流</h2>
+      <p class="sec-desc">从音频捕获到最终导出,RTT 把每一个环节都打磨到位,让你专注观看,而不是折腾工具。</p>
+    </div>
+    <div class="features">
+      <div class="feature reveal"><div class="ic"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9"/><path d="M21 12a9 9 0 0 1-9 9"/><circle cx="12" cy="12" r="3"/></svg></div><h3>系统音频捕获</h3><p>捕获 YouTube、网课、播客、直播与本地播放器的系统音频,无需额外插件。</p></div>
+      <div class="feature reveal"><div class="ic"><svg viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></svg></div><h3>Apple 端侧识别</h3><p>基于 macOS 26 SpeechAnalyzer,语音识别在本机完成,低延迟且保护隐私。</p></div>
+      <div class="feature reveal"><div class="ic"><svg viewBox="0 0 24 24"><path d="M4 5h7"/><path d="M7 2v3"/><path d="M19 8a7 7 0 0 1-7 7"/><path d="M5 16a7 7 0 0 0 7 7"/><path d="M9 19h7"/><path d="M12 22v-3"/></svg></div><h3>Bing 在线翻译</h3><p>识别结果经 Bing 翻译为简体中文,翻译失败可单句重试,稳准兼顾。</p></div>
+      <div class="feature reveal"><div class="ic"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 9h18"/><path d="M7 13h6"/></svg></div><h3>置顶悬浮窗</h3><p>独立窗口置顶显示,可切换原文/译文,锁定后防止误拖动与误缩放。</p></div>
+      <div class="feature reveal"><div class="ic"><svg viewBox="0 0 24 24"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg></div><h3>低延迟预览</h3><p>句子完成前即可看到临时翻译,完成后替换为正式双语字幕,所见即所得。</p></div>
+      <div class="feature reveal"><div class="ic"><svg viewBox="0 0 24 24"><path d="M4 7V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2"/><path d="M9 21h6"/><path d="M12 17v4"/><path d="M4 7h16v10H4z"/></svg></div><h3>字幕样式模板</h3><p>默认 / 黑底 / 透明 / 学习四种模板,适配不同视频背景,看清每个字。</p></div>
+      <div class="feature reveal"><div class="ic"><svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg></div><h3>多格式导出</h3><p>一键导出双语 SRT、TXT 或 Markdown,按完整句子生成正式记录。</p></div>
+      <div class="feature reveal"><div class="ic"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M17.5 14v7"/><path d="M14 17.5h7"/></svg></div><h3>语言灵活切换</h3><p>翻译过程中切换识别语言,不会清空已完成字幕,模型下载进度可见。</p></div>
+      <div class="feature reveal"><div class="ic"><svg viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="4" rx="1"/><path d="M5 6h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z"/><path d="M9 14l2 2 4-4"/></svg></div><h3>复制与重试</h3><p>复制当前字幕或最近 5 条,翻译失败可单句重试,细节处见真章。</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="flow">
+  <div class="wrap">
+    <div class="reveal">
+      <div class="eyebrow">How it works</div>
+      <h2 class="sec-title">四步,从声音到字幕</h2>
+      <p class="sec-desc">声音进入 Mac,文字浮现眼前。整条链路在本地与云端之间精准衔接。</p>
+    </div>
+    <div class="flow reveal">
+      <div class="flow-step">
+        <div class="n">01 / CAPTURE</div>
+        <h4>捕获系统音频</h4>
+        <p>授予屏幕录制权限后,RTT 抓取正在播放的系统音频流。</p>
+      </div>
+      <div class="flow-step">
+        <div class="n">02 / RECOGNIZE</div>
+        <h4>设备端识别</h4>
+        <p>Apple SpeechAnalyzer 在本机完成语音转文字,首用某语言需下载模型。</p>
+      </div>
+      <div class="flow-step">
+        <div class="n">03 / TRANSLATE</div>
+        <h4>实时翻译</h4>
+        <p>识别结果发送至 Bing,译为简体中文,先有预览,后有正式译文。</p>
+      </div>
+      <div class="flow-step">
+        <div class="n">04 / DISPLAY</div>
+        <h4>悬浮窗呈现</h4>
+        <p>双语字幕在置顶窗口显示,可锁定、换样式、复制、导出。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="languages">
+  <div class="wrap">
+    <div class="reveal">
+      <div class="eyebrow">Languages</div>
+      <h2 class="sec-title">支持 18 种语言识别</h2>
+      <p class="sec-desc">覆盖主流外语与亚洲语言。部分语言使用 SpeechTranscriber,其余回退到 DictationTranscriber,首次使用时 macOS 可能需要下载对应模型。</p>
+    </div>
+    <div class="langs reveal">
+      <span class="lang">英语<em>US</em></span>
+      <span class="lang">英语<em>UK</em></span>
+      <span class="lang">俄语</span>
+      <span class="lang">德语</span>
+      <span class="lang">西班牙语</span>
+      <span class="lang">日语</span>
+      <span class="lang">法语</span>
+      <span class="lang">韩语</span>
+      <span class="lang">意大利语</span>
+      <span class="lang">葡萄牙语<em>BR</em></span>
+      <span class="lang">荷兰语</span>
+      <span class="lang">波兰语</span>
+      <span class="lang">土耳其语</span>
+      <span class="lang">泰语</span>
+      <span class="lang">越南语</span>
+      <span class="lang">阿拉伯语</span>
+      <span class="lang">乌克兰语</span>
+      <span class="lang">印地语</span>
+      <span class="lang">印度尼西亚语</span>
+    </div>
+  </div>
+</section>
+
+<section id="start">
+  <div class="wrap">
+    <div class="reveal">
+      <div class="eyebrow">Get started</div>
+      <h2 class="sec-title">装好即用,几行命令跑起来</h2>
+      <p class="sec-desc">需要 macOS 26+、Apple Silicon、Swift 6.2+,以及 Homebrew 安装的 GNU Awk。</p>
+    </div>
+    <div class="getstarted">
+      <div class="code-block reveal">
+        <div class="head"><i class="r"></i><i class="y"></i><i class="g"></i><span class="fn">Terminal</span></div>
+<pre><span class="c"># 1. 安装 GNU Awk 及其运行库</span>
+<span class="t">brew</span> install gawk
+
+<span class="c"># 2. 开发模式直接运行</span>
+<span class="t">swift</span> run RTT
+
+<span class="c"># 3. 构建带固定 Bundle ID 的 App</span>
+./scripts/build-app.sh
+<span class="t">open</span> dist/RTT.app
+
+<span class="c"># 4. 运行测试</span>
+<span class="t">swift</span> test</pre>
+      </div>
+      <ul class="req-list reveal">
+        <li><span class="ic"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg></span><div><b>macOS 26.0 或更高</b><span>Apple Silicon Mac,Silicon 原生运行</span></div></li>
+        <li><span class="ic"><svg viewBox="0 0 24 24"><path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></span><div><b>Swift 6.2+</b><span>用于本地构建与开发</span></div></li>
+        <li><span class="ic"><svg viewBox="0 0 24 24"><path d="M4 17l6-6-6-6"/><path d="M12 19h8"/></svg></span><div><b>GNU Awk 5.4.1</b><span>由 Homebrew 安装,供翻译组件调用</span></div></li>
+        <li><span class="ic"><svg viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg></span><div><b>屏幕录制权限</b><span>用于捕获系统音频</span></div></li>
+        <li><span class="ic"><svg viewBox="0 0 24 24"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><circle cx="12" cy="20" r="1"/></svg></span><div><b>网络连接</b><span>Bing 翻译与首次下载语音模型需要联网</span></div></li>
+      </ul>
+    </div>
+
+    <div class="privacy reveal" id="privacy">
+      <div class="ic"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg></div>
+      <div>
+        <h3>权限与隐私,透明为先</h3>
+        <p>系统音频由 RTT 捕获,语音识别在本机由 Apple SpeechAnalyzer 完成;识别文字仅发送至 Bing 用于翻译。RTT 不保存任何音频文件,导出的字幕也只包含已完成的原文与译文,不包含仍在变化的临时识别内容。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="cta-final">
+  <div class="wrap reveal">
+    <h2>让每一句外语,都有中文相伴</h2>
+    <p>置顶一个窗口,世界就近了一步。</p>
+    <div class="row">
+      <a class="btn btn-primary" href="https://github.com" >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58v-2c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.84 2.81 1.31 3.5 1 .11-.78.42-1.31.76-1.61-2.67-.3-5.47-1.34-5.47-5.96 0-1.32.47-2.39 1.24-3.23-.12-.3-.54-1.52.12-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.29-1.55 3.3-1.23 3.3-1.23.66 1.66.24 2.88.12 3.18.77.84 1.24 1.91 1.24 3.23 0 4.63-2.81 5.65-5.49 5.95.43.37.81 1.1.81 2.22v3.29c0 .32.22.7.83.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5z"/></svg>
+        查看仓库
+      </a>
+      <a class="btn btn-ghost" href="#top">回到顶部</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap row">
+    <div class="copy">RTT · Real Time Translate — macOS 实时双语字幕工具。内含 Translate Shell 与 GNU Awk 5.4.1。</div>
+    <div class="links">
+      <a href="#features">功能</a>
+      <a href="#start">开始使用</a>
+      <a href="#privacy">隐私</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+  // 进入视口动画
+  const io = new IntersectionObserver((entries)=>{
+    entries.forEach(e=>{ if(e.isIntersecting){ e.target.classList.add('in'); io.unobserve(e.target);} });
+  }, {threshold:0.12, rootMargin:'0px 0px -40px 0px'});
+  document.querySelectorAll('.reveal').forEach(el=>io.observe(el));
+
+  // 特性卡片鼠标光晕跟随
+  document.querySelectorAll('.feature').forEach(card=>{
+    card.addEventListener('mousemove', e=>{
+      const r = card.getBoundingClientRect();
+      card.style.setProperty('--mx', ((e.clientX-r.left)/r.width*100)+'%');
+    });
+  });
+
+  // 字幕窗进度条循环动画(轻量装饰)
+  const bars = document.querySelectorAll('.caption-card .bar i');
+  let p = 3;
+  setInterval(()=>{
+    bars.forEach((b,i)=>b.classList.toggle('on', i < p));
+    p = p >= 4 ? 1 : p+1;
+  }, 1400);
+</script>
+</body>
+</html>

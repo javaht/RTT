@@ -8,79 +8,31 @@ struct RTTApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
+        // 菜单栏保留为入口，AppDelegate 启动时自动显示面板窗口
         MenuBarExtra {
-            Menu(appDelegate.appState.selectedLanguageLabel) {
-                ForEach(SystemAudioTranscriber.supportedLanguages, id: \.id) { lang in
-                    Button {
-                        appDelegate.appState.selectLanguage(lang.id)
-                    } label: {
-                        HStack {
-                            Text(lang.label)
-                            if appDelegate.appState.selectedLanguage == lang.id {
-                                Image(systemName: "checkmark")
-                            }
-                        }
-                    }
-                }
-            }
-
-            Menu("语言包管理") {
-                if appDelegate.appState.isLoadingLanguageAssets {
-                    Text("正在读取...")
-                } else if appDelegate.appState.languageAssets.isEmpty {
-                    Text("暂无 RTT 管理的语言包")
-                } else {
-                    ForEach(appDelegate.appState.languageAssets) { asset in
-                        Button("删除 \(asset.label)") {
-                            appDelegate.appState.confirmReleaseLanguage(asset)
-                        }
-                        .disabled(appDelegate.appState.selectedLanguage == asset.id)
-                    }
-                }
-
-                Divider()
-                Button("刷新") {
-                    appDelegate.appState.refreshLanguageAssets()
-                }
-            }
-
-            Divider()
-
-            Button("开始翻译") {
-                appDelegate.startTranslation()
-            }
-            .disabled(appDelegate.appState.isTranslating)
-
-            Button("停止翻译") {
-                appDelegate.stopTranslation()
-            }
-            .disabled(!appDelegate.appState.isTranslating)
-
-            Divider()
-
-            Button("切换原文/译文") {
-                appDelegate.appState.toggleOriginal()
-            }
-
-            Menu("导出") {
-                Button("导出双语 SRT...") {
-                    appDelegate.appState.exportTranscript(format: .srt)
-                }
-                Button("导出双语 TXT...") {
-                    appDelegate.appState.exportTranscript(format: .txt)
-                }
-            }
-            .disabled(!appDelegate.appState.canExport)
-
-            Divider()
-
-            Button("退出") {
-                NSApplication.shared.terminate(nil)
-            }
+            MenuBarExtraContent(
+                showControlPanel: appDelegate.showControlPanel
+            )
         } label: {
-            // 菜单栏图标显示当前语言缩写
-            Text(appDelegate.appState.selectedLanguageShort)
-                .font(.system(size: 10, weight: .medium))
+            Image(systemName: "captions.bubble")
+        }
+    }
+}
+
+/// 菜单栏快捷菜单内容。
+@MainActor
+struct MenuBarExtraContent: View {
+    let showControlPanel: () -> NSWindow
+
+    var body: some View {
+        Button("显示 RTT 主窗口") {
+            _ = showControlPanel()
+        }
+
+        Divider()
+
+        Button("退出 RTT") {
+            NSApplication.shared.terminate(nil)
         }
     }
 }
@@ -90,19 +42,41 @@ struct RTTApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let appState = AppState()
+    let controlPanelWindowController = ControlPanelWindowController()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApplication.shared.setActivationPolicy(.accessory)
+        NSApplication.shared.setActivationPolicy(.regular)
         appState.setupCallbacks()
+        appState.onRequestHideControlPanel = { [weak self] in
+            self?.controlPanelWindowController.hide()
+        }
+        appState.onRequestShowControlPanel = { [weak self] in
+            _ = self?.showControlPanel()
+        }
         appState.refreshLanguageAssets()
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let window = self.showControlPanel()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self, weak window] in
+                guard let self, let window else { return }
+                self.appState.showOnboardingIfNeeded(attachedTo: window)
+            }
+        }
     }
 
-    func startTranslation() {
-        appState.startTranslation()
+    @discardableResult
+    func showControlPanel() -> NSWindow {
+        appState.leaveFloatingTranslationMode()
+        return controlPanelWindowController.show(appState: appState)
     }
 
-    func stopTranslation() {
-        appState.stopTranslation()
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows flag: Bool
+    ) -> Bool {
+        _ = showControlPanel()
+        return true
     }
 }
 
@@ -377,6 +351,11 @@ final class AppState {
     var status: Status = .idle
     var showOriginal: Bool = false
     var isTranslating: Bool = false
+    private(set) var isTranslationReady = false
+    private(set) var isFloatingTranslationMode = false
+    private var shouldEnterFloatingTranslationMode = false
+    var onRequestHideControlPanel: (() -> Void)?
+    var onRequestShowControlPanel: (() -> Void)?
     var selectedLanguage: String = "en-US" {
         didSet {
             selectedLanguageLabel = langLabel(selectedLanguage)
@@ -387,6 +366,53 @@ final class AppState {
     var selectedLanguageShort: String = "US"
     var languageAssets: [LanguageAssetState] = []
     var isLoadingLanguageAssets = false
+
+    // MARK: 视频场景配置（持久化到 UserDefaults）
+    var lowLatencyPreviewEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(lowLatencyPreviewEnabled, forKey: "RTT.lowLatencyPreviewEnabled")
+            if !lowLatencyPreviewEnabled {
+                resetPreviewState()
+            }
+        }
+    }
+    var subtitleWindowLocked: Bool {
+        didSet {
+            UserDefaults.standard.set(subtitleWindowLocked, forKey: "RTT.subtitleWindowLocked")
+            floatingPanel.setLocked(subtitleWindowLocked)
+        }
+    }
+    var subtitleStylePreset: SubtitleStylePreset {
+        didSet {
+            UserDefaults.standard.set(subtitleStylePreset.rawValue, forKey: "RTT.subtitleStylePreset")
+            floatingPanel.setSubtitleStyle(subtitleStylePreset)
+        }
+    }
+
+    /// 用于菜单 disable 判断的正式条目副本
+    var entriesForCopy: [TranslationEntry] {
+        floatingPanel.entries
+    }
+
+    // MARK: - 视频控制面板只读数据
+    // 控制面板通过这些计算属性只读订阅悬浮窗的真实状态，绝不复制业务数据源。
+    // FloatingPanelManager 标记为 @Observable，访问其属性即在 SwiftUI 中注册追踪。
+    /// 最近 5 条正式字幕（只读副本）。
+    var recentEntriesForDisplay: [TranslationEntry] {
+        Array(floatingPanel.entries.suffix(5))
+    }
+    /// 当前临时预览字幕（正式翻译到达前会替换它）。
+    var provisionalEntryForDisplay: TranslationEntry? {
+        floatingPanel.provisionalEntry
+    }
+    /// 当前正在识别的实时原文。
+    var livePreviewText: String {
+        floatingPanel.liveText
+    }
+    /// 是否存在翻译失败的正式条目（用于控制面板“重试失败翻译”按钮启用判断）。
+    var hasFailedTranslations: Bool {
+        floatingPanel.entries.contains { $0.target.hasPrefix("⚠️") }
+    }
 
     let floatingPanel = FloatingPanelManager()
     let transcriber = SystemAudioTranscriber()
@@ -420,12 +446,27 @@ final class AppState {
 
     var canExport = false
 
+    /// 控制面板刷新计数器：每次浮层面板数据变更时递增，
+    /// 控制面板通过读取此值触发 SwiftUI 重新渲染（FloatingPanelManager 非 @Observable）。
+    var panelRefreshCounter = 0
+
+    init() {
+        let defaults = UserDefaults.standard
+        self.lowLatencyPreviewEnabled = defaults.object(forKey: "RTT.lowLatencyPreviewEnabled") as? Bool ?? true
+        self.subtitleWindowLocked = defaults.bool(forKey: "RTT.subtitleWindowLocked")
+        let styleRaw = defaults.string(forKey: "RTT.subtitleStylePreset") ?? SubtitleStylePreset.standard.rawValue
+        self.subtitleStylePreset = SubtitleStylePreset(rawValue: styleRaw) ?? .standard
+    }
+
     func setupCallbacks() {
         floatingPanel.onToggleStart = { [weak self] in
             self?.startTranslation()
         }
         floatingPanel.onToggleOriginal = { [weak self] in
             self?.toggleOriginal()
+        }
+        floatingPanel.onCloseTranslationOnly = { [weak self] in
+            self?.restoreControlPanelFromFloatingMode()
         }
     }
 
@@ -448,6 +489,7 @@ final class AppState {
         do {
             status = .listening
             isTranslating = true
+            isTranslationReady = false
             textTracker.reset()
             stopTranslationWorkers()
             startTranslationWorkers()
@@ -459,7 +501,10 @@ final class AppState {
             guard try await SystemAudioTranscriber.prepareLanguage(locale: locale) else {
                 status = .idle
                 isTranslating = false
+                isTranslationReady = false
+                shouldEnterFloatingTranslationMode = false
                 floatingPanel.hide()
+                restoreControlPanelFromFloatingMode()
                 return
             }
             guard generation == sessionGeneration else { return }
@@ -472,10 +517,14 @@ final class AppState {
             )
             guard generation == sessionGeneration else { return }
 
-            // 3. 显示悬浮窗
-            floatingPanel.show()
+            // 3. 根据当前展示模式更新字幕窗口
             floatingPanel.isTranslating = true
             floatingPanel.update()
+            if isFloatingTranslationMode {
+                floatingPanel.showTranslationOnly()
+            } else {
+                floatingPanel.hide()
+            }
 
             // 4. 启动系统音频捕获 + 单语言实时识别
             let sessionOffset = elapsedTimelineTime()
@@ -496,13 +545,20 @@ final class AppState {
                     guard generation == self.sessionGeneration else { return }
                     self.status = .error(message)
                     self.isTranslating = false
+                    self.isTranslationReady = false
+                    self.shouldEnterFloatingTranslationMode = false
                     self.floatingPanel.isTranslating = false
                     self.floatingPanel.update()
+                    self.restoreControlPanelFromFloatingMode()
                     self.showError(message)
                 }
             }
 
             try await transcriber.start(locale: locale)
+            isTranslationReady = true
+            if shouldEnterFloatingTranslationMode {
+                enterFloatingTranslationMode()
+            }
             refreshLanguageAssets()
         } catch is CancellationError {
             // 用户停止或切换语言时的正常会话取消，不显示错误弹窗。
@@ -511,7 +567,10 @@ final class AppState {
             guard generation == sessionGeneration else { return }
             status = .error(error.localizedDescription)
             isTranslating = false
+            isTranslationReady = false
+            shouldEnterFloatingTranslationMode = false
             floatingPanel.hide()
+            restoreControlPanelFromFloatingMode()
             showError(error.localizedDescription)
         }
     }
@@ -625,6 +684,7 @@ final class AppState {
         let liveText = String(trimmed.dropFirst(liveStart))
             .trimmingCharacters(in: .whitespacesAndNewlines)
         floatingPanel.updateLive(text: liveText, langId: language)
+        panelRefreshCounter += 1
         pendingPreviewText = liveText
         schedulePreview(language: language, generation: generation)
 
@@ -695,6 +755,7 @@ final class AppState {
         }
 
         resetPreviewState()
+        panelRefreshCounter += 1
     }
 
     private func subtitleTiming(
@@ -722,6 +783,7 @@ final class AppState {
     }
 
     private func schedulePreview(language: String, generation: Int) {
+        guard lowLatencyPreviewEnabled else { return }
         guard previewTask == nil, !pendingPreviewText.isEmpty else { return }
         // 去重：与上次预览源相同则不重复请求
         guard pendingPreviewText != lastPreviewSource else { return }
@@ -755,6 +817,7 @@ final class AppState {
 
                 if let result, !result.isEmpty {
                     self.floatingPanel.updateProvisional(source: source, target: result)
+                    self.panelRefreshCounter += 1
                 }
             } catch {
                 // 预翻译失败不打断正式翻译，后续识别文本更新时会再次尝试。
@@ -769,11 +832,183 @@ final class AppState {
     }
 
     private func resetPreviewState() {
+        let hadProvisionalEntry = floatingPanel.provisionalEntry != nil
         previewEpoch += 1
         previewTask?.cancel()
         previewTask = nil
         pendingPreviewText = ""
         floatingPanel.clearProvisional()
+        if hadProvisionalEntry {
+            panelRefreshCounter += 1
+        }
+    }
+
+    // MARK: - 视频场景配置
+
+    func setLowLatencyPreview(_ enabled: Bool) {
+        lowLatencyPreviewEnabled = enabled
+        if !enabled {
+            resetPreviewState()
+        }
+    }
+
+    func setSubtitleWindowLocked(_ locked: Bool) {
+        subtitleWindowLocked = locked
+    }
+
+    func setSubtitleStyle(_ preset: SubtitleStylePreset) {
+        subtitleStylePreset = preset
+    }
+
+    // MARK: - 悬浮译文模式
+
+    func requestFloatingTranslationMode() {
+        if isTranslationReady {
+            enterFloatingTranslationMode()
+            return
+        }
+
+        shouldEnterFloatingTranslationMode = true
+        if !isTranslating {
+            startTranslation()
+        }
+    }
+
+    func enterFloatingTranslationMode() {
+        guard isTranslationReady else { return }
+        shouldEnterFloatingTranslationMode = false
+        isFloatingTranslationMode = true
+        floatingPanel.showTranslationOnly()
+        onRequestHideControlPanel?()
+    }
+
+    func leaveFloatingTranslationMode() {
+        shouldEnterFloatingTranslationMode = false
+        guard isFloatingTranslationMode else { return }
+        isFloatingTranslationMode = false
+        floatingPanel.hide()
+    }
+
+    private func restoreControlPanelFromFloatingMode() {
+        shouldEnterFloatingTranslationMode = false
+        guard isFloatingTranslationMode else { return }
+        leaveFloatingTranslationMode()
+        onRequestShowControlPanel?()
+    }
+
+    // MARK: - 复制字幕
+
+    /// 复制当前（最后一条）正式字幕。
+    func copyCurrentSubtitle() {
+        guard let entry = floatingPanel.entries.last else { return }
+        let text = copyText(for: entry)
+        copyToPasteboard(text)
+    }
+
+    /// 复制最近 N 条正式字幕，带时间轴。
+    func copyRecentSubtitles(count: Int) {
+        let entries = Array(floatingPanel.entries.suffix(count))
+        guard !entries.isEmpty else { return }
+        let text = entries.map(copyTextWithTimestamp(for:)).joined(separator: "\n\n")
+        copyToPasteboard(text)
+    }
+
+    private func copyText(for entry: TranslationEntry) -> String {
+        let source = entry.source.trimmingCharacters(in: .whitespacesAndNewlines)
+        let target = entry.target.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !target.isEmpty, !target.hasPrefix("⚠️") else { return source }
+        return "\(source)\n\(target)"
+    }
+
+    private func copyTextWithTimestamp(for entry: TranslationEntry) -> String {
+        let stamp = formatTimestamp(max(0, entry.startTime))
+        return "[\(stamp)]\n\(copyText(for: entry))"
+    }
+
+    private func formatTimestamp(_ interval: TimeInterval) -> String {
+        TranscriptExporter.displayTimestamp(interval)
+    }
+
+    private func copyToPasteboard(_ text: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+    }
+
+    // MARK: - 翻译失败重试
+
+    /// 重新翻译所有标记为失败的正式条目。
+    func retryFailedTranslations() {
+        let failedEntries = floatingPanel.entries.filter { $0.target.hasPrefix("⚠️") }
+        guard !failedEntries.isEmpty else { return }
+        let epoch = translationEpoch
+        for entry in failedEntries {
+            enqueueTranslation(
+                entry.source,
+                startTime: entry.startTime,
+                endTime: entry.endTime,
+                generation: sessionGeneration,
+                epoch: epoch,
+                orderID: entry.orderID
+            )
+        }
+    }
+
+    // MARK: - 首次使用引导
+
+    func showOnboardingIfNeeded(attachedTo hostWindow: NSWindow) {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: "RTT.hasSeenOnboarding") else { return }
+        showOnboarding(force: false, attachedTo: hostWindow)
+    }
+
+    func showOnboarding(force: Bool, attachedTo hostWindow: NSWindow) {
+        if !force {
+            let defaults = UserDefaults.standard
+            guard !defaults.bool(forKey: "RTT.hasSeenOnboarding") else { return }
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "开始使用 RTT"
+        alert.informativeText = """
+        RTT 会先用 macOS 语音识别模型把视频声音转成文字，再用 Bing 翻译成中文。
+
+        如果选择的语言模型尚未安装，macOS 需要先下载对应的语音识别模型。下载完成后即可实时识别视频声音。
+        """
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "知道了")
+        alert.addButton(withTitle: "不再显示")
+
+        alert.beginSheetModal(for: hostWindow) { response in
+            // "知道了"仅本次看过；"不再显示"永久关闭。
+            if response != .alertFirstButtonReturn {
+                UserDefaults.standard.set(true, forKey: "RTT.hasSeenOnboarding")
+            }
+        }
+    }
+
+    func showOnboardingFromControlPanel() {
+        guard let hostWindow = NSApp.keyWindow ?? NSApp.mainWindow else { return }
+        showOnboarding(force: true, attachedTo: hostWindow)
+    }
+
+    func openREADME() {
+        let possiblePaths = [
+            "/Users/zhou/IdeaProjects/claudespace/RTT/README.md",
+            Bundle.main.bundlePath + "/Contents/Resources/README.md",
+        ]
+        for path in possiblePaths {
+            let url = URL(fileURLWithPath: path)
+            if FileManager.default.fileExists(atPath: path) {
+                NSWorkspace.shared.open(url)
+                return
+            }
+        }
+        showInformation(title: "找不到 README", message: "README.md 文件不存在。")
+    }
+
+    func quit() {
+        NSApplication.shared.terminate(nil)
     }
 
     private func showError(_ message: String) {
@@ -786,6 +1021,7 @@ final class AppState {
     }
 
     func stopTranslation() {
+        let shouldRestoreControlPanel = isFloatingTranslationMode
         sessionGeneration += 1
         transcriber.stop()
         debounceTask?.cancel()
@@ -793,10 +1029,17 @@ final class AppState {
         stopTranslationWorkers()
         resetPreviewState()
         isTranslating = false
+        isTranslationReady = false
+        shouldEnterFloatingTranslationMode = false
         status = .idle
         floatingPanel.isTranslating = false
         floatingPanel.updateLive(text: "")
         floatingPanel.hide()
+        panelRefreshCounter += 1
+        if shouldRestoreControlPanel {
+            leaveFloatingTranslationMode()
+            onRequestShowControlPanel?()
+        }
     }
 
     // MARK: - 并发翻译
@@ -901,6 +1144,7 @@ final class AppState {
             textTracker.markAppended(orderID: entry.orderID)
         }
         canExport = true
+        panelRefreshCounter += 1
     }
 
     func selectLanguage(_ id: String) {
@@ -956,7 +1200,11 @@ final class AppState {
         guard !entries.isEmpty else { return }
 
         let panel = NSSavePanel()
-        panel.title = format == .srt ? "导出双语 SRT" : "导出双语 TXT"
+        switch format {
+        case .srt: panel.title = "导出双语 SRT"
+        case .txt: panel.title = "导出双语 TXT"
+        case .markdown: panel.title = "导出 Markdown"
+        }
         panel.nameFieldStringValue = TranscriptExporter.defaultFilename(for: format)
         panel.allowedContentTypes = [format.contentType]
         panel.canCreateDirectories = true

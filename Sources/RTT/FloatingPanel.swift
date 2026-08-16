@@ -5,6 +5,99 @@ enum PanelResizeCorner {
     case topLeft, topRight, bottomLeft, bottomRight
 }
 
+/// 字幕样式模板
+enum SubtitleStylePreset: String, CaseIterable {
+    case standard
+    case black
+    case transparent
+    case learning
+
+    var label: String {
+        switch self {
+        case .standard: "默认"
+        case .black: "黑底"
+        case .transparent: "透明"
+        case .learning: "学习"
+        }
+    }
+}
+
+/// 字幕样式配置（由 preset 推导出的具体视觉参数）
+struct SubtitleStyle {
+    var backgroundOpacity: Double
+    var cardOpacity: Double
+    var sourceFontSize: CGFloat
+    var targetFontSize: CGFloat
+    var sourceWeight: Font.Weight
+    var targetWeight: Font.Weight
+    var sourceColor: Color
+    var targetColor: Color
+    var textShadow: Bool
+    var borderColor: Color
+    var borderOpacity: Double
+
+    static func resolve(preset: SubtitleStylePreset, showOriginal: Bool) -> SubtitleStyle {
+        switch preset {
+        case .standard:
+            return SubtitleStyle(
+                backgroundOpacity: 0.55,
+                cardOpacity: 0.08,
+                sourceFontSize: 14,
+                targetFontSize: 15,
+                sourceWeight: .regular,
+                targetWeight: .medium,
+                sourceColor: .white.opacity(0.7),
+                targetColor: .white,
+                textShadow: false,
+                borderColor: .white,
+                borderOpacity: 0.15
+            )
+        case .black:
+            return SubtitleStyle(
+                backgroundOpacity: 0.85,
+                cardOpacity: 0.12,
+                sourceFontSize: 14,
+                targetFontSize: 16,
+                sourceWeight: .regular,
+                targetWeight: .semibold,
+                sourceColor: .white.opacity(0.85),
+                targetColor: .white,
+                textShadow: false,
+                borderColor: .white,
+                borderOpacity: 0.25
+            )
+        case .transparent:
+            return SubtitleStyle(
+                backgroundOpacity: 0.0,
+                cardOpacity: 0.04,
+                sourceFontSize: 14,
+                targetFontSize: 15,
+                sourceWeight: .regular,
+                targetWeight: .medium,
+                sourceColor: .white.opacity(0.65),
+                targetColor: .white.opacity(0.95),
+                textShadow: true,
+                borderColor: .white,
+                borderOpacity: 0.1
+            )
+        case .learning:
+            return SubtitleStyle(
+                backgroundOpacity: 0.6,
+                cardOpacity: 0.08,
+                sourceFontSize: 16,
+                targetFontSize: 14,
+                sourceWeight: .medium,
+                targetWeight: .regular,
+                sourceColor: .white,
+                targetColor: .white.opacity(0.75),
+                textShadow: false,
+                borderColor: .white,
+                borderOpacity: 0.15
+            )
+        }
+    }
+}
+
 private final class PanelResizeHandle: NSView {
     private let corner: PanelResizeCorner
 
@@ -112,6 +205,16 @@ private final class PanelContentView<Content: View>: NSView {
         nil
     }
 
+    /// 锁定时隐藏 resize handles 并禁止拖动
+    var isLocked: Bool = false {
+        didSet {
+            topLeftHandle.isHidden = isLocked
+            topRightHandle.isHidden = isLocked
+            bottomLeftHandle.isHidden = isLocked
+            bottomRightHandle.isHidden = isLocked
+        }
+    }
+
     override func layout() {
         super.layout()
         hostingView.frame = bounds
@@ -155,6 +258,7 @@ struct TranslationEntry: Identifiable, Equatable {
 final class FloatingPanelManager {
     private var panel: NSPanel?
     private var hostingView: NSHostingView<TranscriptView>?
+    private var contentView: PanelContentView<TranscriptView>?
 
     /// 高频实时更新节流（合并每 120ms 窗口内的多次变更）。
     private var liveUpdateTask: Task<Void, Never>?
@@ -169,6 +273,11 @@ final class FloatingPanelManager {
     /// 当前正在识别的实时文本（原文，显示在最底部）
     var liveText: String = ""
     var liveLangId: String = ""
+    /// 悬浮窗锁定状态
+    var isLocked: Bool = false
+    /// 字幕样式
+    var subtitleStyle: SubtitleStylePreset = .standard
+    private var translationOnlyMode = false
 
     struct LiveInfo {
         var text: String
@@ -177,6 +286,7 @@ final class FloatingPanelManager {
 
     var onToggleStart: (() -> Void)?
     var onToggleOriginal: (() -> Void)?
+    var onCloseTranslationOnly: (() -> Void)?
 
     /// 创建并显示悬浮窗。
     func show() {
@@ -192,15 +302,22 @@ final class FloatingPanelManager {
             showOriginal: showOriginal,
             liveText: liveText,
             liveLangId: liveLangId,
+            subtitleStyle: subtitleStyle,
+            translationOnly: translationOnlyMode,
             onToggleStart: onToggleStart ?? {},
-            onToggleOriginal: onToggleOriginal ?? {}
+            onToggleOriginal: onToggleOriginal ?? {},
+            onCloseTranslationOnly: onCloseTranslationOnly ?? {}
         )
         let hosting = NSHostingView(rootView: view)
         let contentView = PanelContentView(hostingView: hosting)
         hostingView = hosting
+        self.contentView = contentView
 
+        let initialSize = translationOnlyMode
+            ? NSSize(width: 560, height: 320)
+            : NSSize(width: 420, height: 320)
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 320),
+            contentRect: NSRect(origin: .zero, size: initialSize),
             styleMask: [.titled, .resizable, .fullSizeContentView, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -211,7 +328,9 @@ final class FloatingPanelManager {
         panel.standardWindowButton(.closeButton)?.isHidden = true
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
         panel.standardWindowButton(.zoomButton)?.isHidden = true
-        panel.minSize = NSSize(width: 260, height: 160)
+        panel.minSize = translationOnlyMode
+            ? NSSize(width: 360, height: 200)
+            : NSSize(width: 260, height: 160)
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.isOpaque = false
@@ -220,24 +339,59 @@ final class FloatingPanelManager {
         panel.isFloatingPanel = true
         panel.isMovableByWindowBackground = true
         panel.hidesOnDeactivate = false
+        contentView.isLocked = isLocked
         panel.contentView = contentView
 
-        // 默认放右边中间
+        // 悬浮译文默认位于屏幕右侧中央。
         if let screen = NSScreen.main {
             let frame = screen.visibleFrame
-            panel.setFrameOrigin(NSPoint(
-                x: frame.maxX - 440,
-                y: frame.midY - 160
-            ))
+            if translationOnlyMode {
+                panel.setFrameOrigin(NSPoint(
+                    x: frame.maxX - initialSize.width - 24,
+                    y: frame.midY - initialSize.height / 2
+                ))
+            } else {
+                panel.setFrameOrigin(NSPoint(
+                    x: frame.maxX - 440,
+                    y: frame.midY - 160
+                ))
+            }
         }
 
         self.panel = panel
         panel.orderFront(nil)
     }
 
+    func showTranslationOnly() {
+        translationOnlyMode = true
+        showOriginal = false
+        if let panel {
+            panel.hasShadow = true
+            panel.minSize = NSSize(width: 360, height: 200)
+            contentView?.isLocked = isLocked
+            update()
+            panel.orderFront(nil)
+        } else {
+            show()
+        }
+    }
+
     /// 立即重建整个视图（用于结构性变更，如追加条目、切换原文/译文）。
     func update() {
         performUpdate()
+    }
+
+    /// 锁定/解锁悬浮窗：锁定后禁止拖动和缩放。
+    func setLocked(_ locked: Bool) {
+        isLocked = locked
+        contentView?.isLocked = locked
+        panel?.isMovableByWindowBackground = !locked
+    }
+
+    /// 设置字幕样式模板。
+    func setSubtitleStyle(_ preset: SubtitleStylePreset) {
+        subtitleStyle = preset
+        update()
     }
 
     /// 高频实时更新走节流：窗口期内合并所有变更，最多每 120ms 渲染一次。
@@ -267,8 +421,11 @@ final class FloatingPanelManager {
             showOriginal: showOriginal,
             liveText: liveText,
             liveLangId: liveLangId,
+            subtitleStyle: subtitleStyle,
+            translationOnly: translationOnlyMode,
             onToggleStart: onToggleStart ?? {},
-            onToggleOriginal: onToggleOriginal ?? {}
+            onToggleOriginal: onToggleOriginal ?? {},
+            onCloseTranslationOnly: onCloseTranslationOnly ?? {}
         )
         hostingView?.needsLayout = true
     }
@@ -332,12 +489,82 @@ struct TranscriptView: View {
     var showOriginal: Bool
     var liveText: String
     var liveLangId: String
+    var subtitleStyle: SubtitleStylePreset
+    var translationOnly: Bool
     var onToggleStart: () -> Void
     var onToggleOriginal: () -> Void
+    var onCloseTranslationOnly: () -> Void
 
     @State private var autoScroll = true
 
+    private var style: SubtitleStyle {
+        SubtitleStyle.resolve(preset: subtitleStyle, showOriginal: showOriginal)
+    }
+
     var body: some View {
+        Group {
+            if translationOnly {
+                translationOnlyView
+            } else {
+                standardView
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var translationOnlyView: some View {
+        ZStack(alignment: .topLeading) {
+            Color.clear
+            if let text = visibleTranslation {
+                Text(text)
+                    .font(.system(size: 20, weight: .medium))
+                    .foregroundColor(.white)
+                    .multilineTextAlignment(.leading)
+                    .lineLimit(7)
+                    .minimumScaleFactor(0.8)
+                    .shadow(color: .black.opacity(0.95), radius: 2, x: 0, y: 1)
+                    .shadow(color: .black.opacity(0.55), radius: 4, x: 0, y: 1)
+                    .padding(.horizontal, 24)
+                    .padding(.top, 34)
+                    .padding(.bottom, 16)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            }
+            Button(action: onCloseTranslationOnly) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(.white)
+                    .frame(width: 26, height: 26)
+                    .background(Color.black.opacity(0.62))
+                    .clipShape(Circle())
+                    .overlay {
+                        Circle().stroke(Color.white.opacity(0.28), lineWidth: 1)
+                    }
+            }
+            .buttonStyle(.plain)
+            .padding(.leading, 30)
+            .padding(.top, 14)
+            .help("关闭悬浮译文并返回主窗口")
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black.opacity(0.78))
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(Color.white.opacity(0.16), lineWidth: 1)
+        }
+        .padding(8)
+        .accessibilityLabel("悬浮译文")
+    }
+
+    private var visibleTranslation: String? {
+        let candidate = provisionalEntry?.target ?? entries.last?.target
+        guard let candidate else { return nil }
+        let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.hasPrefix("⚠️") else { return nil }
+        return trimmed
+    }
+
+    private var standardView: some View {
         VStack(spacing: 0) {
             // 顶部工具条
             HStack {
@@ -379,44 +606,16 @@ struct TranscriptView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 10) {
                         ForEach(entries) { entry in
-                            VStack(alignment: .leading, spacing: 3) {
-                                if showOriginal {
-                                    Text(entry.source)
-                                        .font(.system(size: 14))
-                                        .foregroundColor(.white.opacity(0.7))
-                                } else {
-                                    Text(entry.target)
-                                        .font(.system(size: 15, weight: .medium))
-                                        .foregroundColor(.white)
-                                }
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(8)
-                            .background(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .fill(Color.white.opacity(0.08))
-                            )
-                            .onTapGesture { onToggleOriginal() }
-                            .id(entry.id)
+                            entryCard(source: entry.source, target: entry.target)
+                                .onTapGesture { onToggleOriginal() }
+                                .id(entry.id)
                         }
 
                         if let provisionalEntry {
-                            VStack(alignment: .leading, spacing: 3) {
-                                if showOriginal {
-                                    Text(provisionalEntry.source)
-                                        .font(.system(size: 14))
-                                        .foregroundColor(.white.opacity(0.65))
-                                } else {
-                                    Text(provisionalEntry.target)
-                                        .font(.system(size: 15, weight: .medium))
-                                        .foregroundColor(.white.opacity(0.82))
-                                }
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(8)
-                            .background(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .fill(Color.white.opacity(0.06))
+                            entryCard(
+                                source: provisionalEntry.source,
+                                target: provisionalEntry.target,
+                                provisional: true
                             )
                             .onTapGesture { onToggleOriginal() }
                             .id("provisional")
@@ -469,12 +668,36 @@ struct TranscriptView: View {
                     }
                 }
             }
-            .background(Color.black.opacity(0.55))
+            .background(Color.black.opacity(style.backgroundOpacity))
         }
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .overlay(
             RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.white.opacity(0.15), lineWidth: 1)
+                .stroke(Color.white.opacity(style.borderOpacity), lineWidth: 1)
+        )
+    }
+
+    /// 单条字幕卡片（原文/译文按 showOriginal 切换）
+    @ViewBuilder
+    private func entryCard(source: String, target: String, provisional: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            if showOriginal {
+                Text(source)
+                    .font(.system(size: style.sourceFontSize, weight: style.sourceWeight))
+                    .foregroundColor(style.sourceColor.opacity(provisional ? 0.55 : 0.75))
+                    .shadow(color: style.textShadow ? .black.opacity(0.8) : .clear, radius: 2)
+            } else {
+                Text(target)
+                    .font(.system(size: style.targetFontSize, weight: style.targetWeight))
+                    .foregroundColor(style.targetColor.opacity(provisional ? 0.82 : 1.0))
+                    .shadow(color: style.textShadow ? .black.opacity(0.8) : .clear, radius: 2)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.white.opacity(provisional ? style.cardOpacity * 0.75 : style.cardOpacity))
         )
     }
 

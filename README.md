@@ -1,16 +1,21 @@
 # RTT(Real Time Translate)
 
-RTT(Real Time Translate) 是一款运行在 macOS 菜单栏的实时字幕翻译工具。它捕获系统音频，使用 Apple SpeechAnalyzer 在设备端识别语音，再通过 Bing 将识别结果翻译成简体中文。
+RTT 是一款面向 Mac 视频观看场景的实时双语字幕工具，适合 YouTube、网课、播客、直播和本地播放器。它捕获系统音频，使用 Apple SpeechAnalyzer 在设备端识别外语语音，并通过 Bing 将识别结果翻译成简体中文，以置顶悬浮窗显示双语字幕。
 
 ## 功能
 
-- 捕获视频、会议和直播等应用播放的系统音频
+- 捕获 YouTube、网课、播客、直播和本地播放器等播放的系统音频
 - 使用 macOS 26 SpeechAnalyzer 进行设备端实时语音识别
 - 支持在翻译过程中切换识别语言
 - 使用 Bing 在线翻译为简体中文
 - 在置顶悬浮窗中切换显示原文或译文
-- 按完整句子生成记录，并提供滚动预翻译
-- 导出双语 SRT 字幕或 TXT 文本
+- 低延迟预览：句子完成前即可看到临时翻译，完成后替换为正式双语字幕
+- 悬浮窗锁定：防止观看视频时误拖动、误缩放
+- 字幕样式模板：默认 / 黑底 / 透明 / 学习，适配不同视频背景
+- 复制当前字幕或最近 5 条字幕
+- 按完整句子生成正式记录，并提供滚动预翻译
+- 导出双语 SRT、TXT 或 Markdown
+- 翻译失败可单句重试
 - 显示语言模型下载进度，下载完成后自动开始识别
 - 管理 RTT 自己保留的 Apple 语音模型
 
@@ -36,7 +41,8 @@ RTT(Real Time Translate) 是一款运行在 macOS 菜单栏的实时字幕翻译
 3. 点击“开始翻译”，并按系统提示授予屏幕录制权限。
 4. 播放视频，翻译结果会显示在置顶悬浮窗中。
 5. 点击悬浮窗文字或菜单中的“切换原文/译文”切换显示内容。
-6. 从“导出”菜单保存双语 SRT 或 TXT。
+6. 从“导出”菜单保存双语 SRT、TXT 或 Markdown。
+7. 在“视频字幕”菜单中切换低延迟预览、锁定窗口或选择字幕样式。
 
 翻译过程中切换语言不会清空已经完成的字幕记录。
 
@@ -103,7 +109,7 @@ Sources/RTT/
   FloatingPanel.swift          置顶字幕窗口
   TranslationService.swift     翻译服务入口
   OnlineTranslationService.swift
-  TranscriptExporter.swift     SRT/TXT 导出
+  TranscriptExporter.swift     SRT/TXT/Markdown 导出
 Packaging/Info.plist            App Bundle 信息和权限说明
 scripts/build-app.sh            Release App 打包与签名
 Tests/RTTTests/                 字幕导出测试

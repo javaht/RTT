@@ -418,13 +418,6 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
         self.inputBuilder = inputBuilder
         resultTask = makeResultTask(for: transcriber, sessionID: sessionID)
 
-        do {
-            try await analyzer.start(inputSequence: inputSequence)
-        } catch {
-            clearSession(ifMatching: sessionID)
-            throw error
-        }
-
         guard activeSessionID == sessionID else { throw CancellationError() }
 
         let content: SCShareableContent

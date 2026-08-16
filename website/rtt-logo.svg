@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <!-- 背景渐变 -->
+    <linearGradient id="bg" x1="50%" y1="0%" x2="50%" y2="100%">
+      <stop offset="0%" stop-color="#1c2533"/>
+      <stop offset="35%" stop-color="#141c28"/>
+      <stop offset="100%" stop-color="#0a0f18"/>
+    </linearGradient>
+
+    <!-- 边框微弱光泽 -->
+    <linearGradient id="rim" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#3d4f66" stop-opacity="0.8"/>
+      <stop offset="100%" stop-color="#101824" stop-opacity="0.4"/>
+    </linearGradient>
+
+    <!-- 字符金属拉丝质感渐变 -->
+    <linearGradient id="metal" x1="50%" y1="0%" x2="50%" y2="100%">
+      <stop offset="0%" stop-color="#e6f1f8"/>
+      <stop offset="20%" stop-color="#bfd8ea"/>
+      <stop offset="60%" stop-color="#6f8ca3"/>
+      <stop offset="100%" stop-color="#41596e"/>
+    </linearGradient>
+
+    <!-- 顶部高光 -->
+    <linearGradient id="edge-light" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#bce0fd" stop-opacity="0.4"/>
+    </linearGradient>
+
+    <!-- 柔和投影滤镜 -->
+    <filter id="app-shadow" x="-15%" y="-15%" width="130%" height="135%">
+      <feDropShadow dx="0" dy="24" stdDeviation="28" flood-color="#000000" flood-opacity="0.6"/>
+    </filter>
+
+    <filter id="text-shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#000000" flood-opacity="0.5"/>
+      <feDropShadow dx="0" dy="2" stdDeviation="2" flood-color="#000000" flood-opacity="0.7"/>
+    </filter>
+
+    <!-- 居中暗调光晕 -->
+    <radialGradient id="vignette" cx="50%" cy="35%" r="65%">
+      <stop offset="0%" stop-color="#2a3c52" stop-opacity="0.45"/>
+      <stop offset="100%" stop-color="#070c14" stop-opacity="0.85"/>
+    </radialGradient>
+  </defs>
+
+  <!-- 图标底座 (Squircle) -->
+  <rect x="44" y="44" width="424" height="424" rx="100" ry="100" fill="url(#bg)" stroke="url(#rim)" stroke-width="2.5" filter="url(#app-shadow)"/>
+  <rect x="44" y="44" width="424" height="424" rx="100" ry="100" fill="url(#vignette)"/>
+
+  <!-- RTT 标志主体 -->
+  <g transform="translate(68, 186)" filter="url(#text-shadow)">
+    <!-- 字母 R (带科技感切角) -->
+    <g id="letter-R">
+      <path fill="url(#metal)" fill-rule="evenodd" d="
+        M 18,34 H 38 V 0 H 88 C 108,0 120,12 120,32 C 120,49 108,60 92,65 L 126,140 H 98 L 68,72 H 38 V 140 H 18 V 34 Z
+        M 38,22 V 52 H 84 C 94,52 100,46 100,37 C 100,28 94,22 84,22 H 38 Z
+      "/>
+      <path d="M 38,0 H 88 C 108,0 120,12 120,32" fill="none" stroke="url(#edge-light)" stroke-width="1.8" stroke-linecap="round"/>
+      <path d="M 18,34 H 38" fill="none" stroke="url(#edge-light)" stroke-width="1.8" stroke-linecap="round"/>
+    </g>
+
+    <!-- 字母 T1 -->
+    <g id="letter-T1" transform="translate(138, 0)">
+      <path fill="url(#metal)" d="M 0,0 H 106 V 24 H 65 V 140 H 41 V 24 H 0 Z"/>
+      <path d="M 0,0 H 106 V 2" fill="none" stroke="url(#edge-light)" stroke-width="1.8" stroke-linecap="round"/>
+    </g>
+
+    <!-- 字母 T2 -->
+    <g id="letter-T2" transform="translate(262, 0)">
+      <path fill="url(#metal)" d="M 0,0 H 106 V 24 H 65 V 140 H 41 V 24 H 0 Z"/>
+      <path d="M 0,0 H 106 V 2" fill="none" stroke="url(#edge-light)" stroke-width="1.8" stroke-linecap="round"/>
+    </g>
+  </g>
+</svg>
