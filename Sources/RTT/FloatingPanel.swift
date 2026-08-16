@@ -515,19 +515,41 @@ struct TranscriptView: View {
     private var translationOnlyView: some View {
         ZStack(alignment: .topLeading) {
             Color.clear
-            if let text = visibleTranslation {
-                Text(text)
-                    .font(.system(size: 20, weight: .medium))
-                    .foregroundColor(.white)
-                    .multilineTextAlignment(.leading)
-                    .lineLimit(7)
-                    .minimumScaleFactor(0.8)
-                    .shadow(color: .black.opacity(0.95), radius: 2, x: 0, y: 1)
-                    .shadow(color: .black.opacity(0.55), radius: 4, x: 0, y: 1)
+            ScrollViewReader { proxy in
+                ScrollView(.vertical, showsIndicators: true) {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        ForEach(entries) { entry in
+                            if let text = translationText(entry.target) {
+                                translationOnlyLine(text)
+                                    .id(entry.id)
+                            }
+                        }
+
+                        if let provisionalEntry,
+                           let text = translationText(provisionalEntry.target) {
+                            translationOnlyLine(text, provisional: true)
+                                .id("provisional")
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 24)
-                    .padding(.top, 34)
-                    .padding(.bottom, 16)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                    .padding(.top, 52)
+                    .padding(.bottom, 20)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .onAppear {
+                    scrollToLatest(using: proxy, animated: false)
+                }
+                .onChange(of: entries.count) {
+                    if autoScroll {
+                        scrollToLatest(using: proxy)
+                    }
+                }
+                .onChange(of: provisionalEntry) {
+                    if autoScroll {
+                        scrollToLatest(using: proxy)
+                    }
+                }
             }
             Button(action: onCloseTranslationOnly) {
                 Image(systemName: "xmark")
@@ -556,12 +578,39 @@ struct TranscriptView: View {
         .accessibilityLabel("悬浮译文")
     }
 
-    private var visibleTranslation: String? {
-        let candidate = provisionalEntry?.target ?? entries.last?.target
-        guard let candidate else { return nil }
-        let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !trimmed.hasPrefix("⚠️") else { return nil }
-        return trimmed
+    private func translationOnlyLine(_ text: String, provisional: Bool = false) -> some View {
+        Text(text)
+            .font(.system(size: 20, weight: .medium))
+            .foregroundColor(.white.opacity(provisional ? 0.78 : 1.0))
+            .multilineTextAlignment(.leading)
+            .shadow(color: .black.opacity(0.95), radius: 2, x: 0, y: 1)
+            .shadow(color: .black.opacity(0.55), radius: 4, x: 0, y: 1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func translationText(_ text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private var latestTranslationID: UUID? {
+        entries.reversed().first { translationText($0.target) != nil }?.id
+    }
+
+    private func scrollToLatest(using proxy: ScrollViewProxy, animated: Bool = true) {
+        if let provisionalEntry, translationText(provisionalEntry.target) != nil {
+            if animated {
+                withAnimation { proxy.scrollTo("provisional", anchor: .bottom) }
+            } else {
+                proxy.scrollTo("provisional", anchor: .bottom)
+            }
+        } else if let latestTranslationID {
+            if animated {
+                withAnimation { proxy.scrollTo(latestTranslationID, anchor: .bottom) }
+            } else {
+                proxy.scrollTo(latestTranslationID, anchor: .bottom)
+            }
+        }
     }
 
     private var standardView: some View {
