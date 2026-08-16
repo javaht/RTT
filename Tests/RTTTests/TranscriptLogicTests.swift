@@ -3,6 +3,15 @@ import Testing
 @testable import RTT
 
 struct TranscriptLogicTests {
+    @Test
+    func chineseLanguageIdentifiersUseDirectRecognition() {
+        #expect(isChineseLanguageIdentifier("zh"))
+        #expect(isChineseLanguageIdentifier("zh-CN"))
+        #expect(isChineseLanguageIdentifier("zh_CN"))
+        #expect(isChineseLanguageIdentifier("zh-Hans"))
+        #expect(!isChineseLanguageIdentifier("en-US"))
+    }
+
     // MARK: - CommittedTextTracker
 
     @Test

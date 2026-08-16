@@ -67,6 +67,26 @@ struct TranscriptExporterTests {
     }
 
     @Test
+    func testDirectRecognitionExportsOnlyRecognizedText() {
+        let entry = TranslationEntry(
+            orderID: 0,
+            source: "你好，世界。",
+            target: "你好，世界。",
+            startTime: 2,
+            endTime: 3
+        )
+
+        #expect(
+            TranscriptExporter.srt(entries: [entry]) == """
+            1
+            00:00:02,000 --> 00:00:03,000
+            你好，世界。
+            """
+        )
+        #expect(TranscriptExporter.txt(entries: [entry]) == "你好，世界。")
+    }
+
+    @Test
     func testEmptyExportProducesEmptyFile() {
         #expect(TranscriptExporter.srt(entries: []) == "")
         #expect(TranscriptExporter.txt(entries: []) == "")

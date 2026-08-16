@@ -101,9 +101,14 @@ struct ControlPanelView: View {
     private var transcriptWorkspace: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
-                transcriptColumnHeader(title: "原文", systemImage: "waveform")
-                columnDivider
-                transcriptColumnHeader(title: "中文翻译", systemImage: "character.book.closed")
+                transcriptColumnHeader(
+                    title: appState.isRecognitionOnly ? "识别文字" : "原文",
+                    systemImage: appState.isRecognitionOnly ? "text.viewfinder" : "waveform"
+                )
+                if !appState.isRecognitionOnly {
+                    columnDivider
+                    transcriptColumnHeader(title: "中文翻译", systemImage: "character.book.closed")
+                }
             }
             .frame(height: 52)
             .background(CPColor.panelBackground)
@@ -135,9 +140,11 @@ struct ControlPanelView: View {
                 }
             } else {
                 HStack(spacing: 0) {
-                    emptyColumn(text: appState.isTranslating ? "等待识别原文" : "等待开始")
-                    columnDivider
-                    emptyColumn(text: appState.isTranslating ? "等待中文翻译" : "等待开始")
+                    emptyColumn(text: appState.isTranslating ? "等待识别文字" : "等待开始")
+                    if !appState.isRecognitionOnly {
+                        columnDivider
+                        emptyColumn(text: appState.isTranslating ? "等待中文翻译" : "等待开始")
+                    }
                 }
             }
         }
@@ -184,9 +191,15 @@ struct ControlPanelView: View {
 
     private func transcriptRow(source: String, target: String, isProvisional: Bool) -> some View {
         HStack(alignment: .top, spacing: 0) {
-            transcriptCell(text: source, isTarget: false, isProvisional: isProvisional)
-            columnDivider
-            transcriptCell(text: target, isTarget: true, isProvisional: isProvisional)
+            transcriptCell(
+                text: appState.isRecognitionOnly ? target : source,
+                isTarget: appState.isRecognitionOnly,
+                isProvisional: isProvisional
+            )
+            if !appState.isRecognitionOnly {
+                columnDivider
+                transcriptCell(text: target, isTarget: true, isProvisional: isProvisional)
+            }
         }
         .frame(maxWidth: .infinity, minHeight: 92, alignment: .top)
         .background(isProvisional ? CPColor.fieldBackground.opacity(0.7) : Color.clear)

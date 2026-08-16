@@ -172,6 +172,7 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
 
     /// 支持的识别语言列表
     static let supportedLanguages: [(id: String, label: String)] = [
+        ("zh-CN", "🇨🇳 中文（简体）"),
         ("en-US", "🇺🇸 英语（美国）"),
         ("en-GB", "🇬🇧 英语（英国）"),
         ("ru-RU", "🇷🇺 俄语"),

@@ -278,6 +278,7 @@ final class FloatingPanelManager {
     /// 字幕样式
     var subtitleStyle: SubtitleStylePreset = .standard
     private var translationOnlyMode = false
+    private var recognitionOnlyMode = false
 
     struct LiveInfo {
         var text: String
@@ -304,6 +305,7 @@ final class FloatingPanelManager {
             liveLangId: liveLangId,
             subtitleStyle: subtitleStyle,
             translationOnly: translationOnlyMode,
+            recognitionOnly: recognitionOnlyMode,
             onToggleStart: onToggleStart ?? {},
             onToggleOriginal: onToggleOriginal ?? {},
             onCloseTranslationOnly: onCloseTranslationOnly ?? {}
@@ -360,6 +362,11 @@ final class FloatingPanelManager {
 
         self.panel = panel
         panel.orderFront(nil)
+    }
+
+    func setRecognitionOnly(_ enabled: Bool) {
+        recognitionOnlyMode = enabled
+        update()
     }
 
     func showTranslationOnly() {
@@ -423,6 +430,7 @@ final class FloatingPanelManager {
             liveLangId: liveLangId,
             subtitleStyle: subtitleStyle,
             translationOnly: translationOnlyMode,
+            recognitionOnly: recognitionOnlyMode,
             onToggleStart: onToggleStart ?? {},
             onToggleOriginal: onToggleOriginal ?? {},
             onCloseTranslationOnly: onCloseTranslationOnly ?? {}
@@ -491,6 +499,7 @@ struct TranscriptView: View {
     var liveLangId: String
     var subtitleStyle: SubtitleStylePreset
     var translationOnly: Bool
+    var recognitionOnly: Bool
     var onToggleStart: () -> Void
     var onToggleOriginal: () -> Void
     var onCloseTranslationOnly: () -> Void
@@ -537,6 +546,11 @@ struct TranscriptView: View {
                     .padding(.bottom, 20)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .onScrollGeometryChange(for: Bool.self) { geometry in
+                    isAtBottom(geometry)
+                } action: { _, atBottom in
+                    autoScroll = atBottom
+                }
                 .onAppear {
                     scrollToLatest(using: proxy, animated: false)
                 }
@@ -611,6 +625,17 @@ struct TranscriptView: View {
                 proxy.scrollTo(latestTranslationID, anchor: .bottom)
             }
         }
+    }
+
+    /// 仅当滚动条仍在底部时跟随新字幕；用户上滑查看历史后保持当前位置。
+    private func isAtBottom(_ geometry: ScrollGeometry) -> Bool {
+        let bottomOffset = max(
+            0,
+            geometry.contentSize.height
+                - geometry.containerSize.height
+                + geometry.contentInsets.bottom
+        )
+        return geometry.contentOffset.y >= bottomOffset - 24
     }
 
     private var standardView: some View {
@@ -694,6 +719,11 @@ struct TranscriptView: View {
                         }
                     }
                     .padding(10)
+                }
+                .onScrollGeometryChange(for: Bool.self) { geometry in
+                    isAtBottom(geometry)
+                } action: { _, atBottom in
+                    autoScroll = atBottom
                 }
                 .onChange(of: entries.count) {
                     if autoScroll {

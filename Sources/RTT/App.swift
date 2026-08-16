@@ -115,6 +115,11 @@ func completeSentences(in text: String) -> (sentences: [CompletedSentence], cons
     return (sentences, consumed)
 }
 
+func isChineseLanguageIdentifier(_ identifier: String) -> Bool {
+    let normalized = identifier.lowercased().replacingOccurrences(of: "_", with: "-")
+    return normalized == "zh" || normalized.hasPrefix("zh-")
+}
+
 /// 一条已提交的句子记录（用于回滚时定位条目）。
 struct CommittedLine: Sendable {
     let text: String
@@ -348,9 +353,31 @@ final class AppState {
         case error(String)
     }
 
+    enum ProcessingMode: String, CaseIterable {
+        case translation
+        case recognition
+
+        var label: String {
+            switch self {
+            case .translation: "翻译"
+            case .recognition: "仅识别"
+            }
+        }
+    }
+
     var status: Status = .idle
     var showOriginal: Bool = false
     var isTranslating: Bool = false
+    var processingMode: ProcessingMode {
+        didSet {
+            UserDefaults.standard.set(processingMode.rawValue, forKey: "RTT.processingMode")
+            floatingPanel.setRecognitionOnly(isRecognitionOnly)
+            if isTranslating { restartTranslation() }
+        }
+    }
+    var isRecognitionOnly: Bool {
+        processingMode == .recognition || isChineseLanguageIdentifier(selectedLanguage)
+    }
     private(set) var isTranslationReady = false
     private(set) var isFloatingTranslationMode = false
     private var shouldEnterFloatingTranslationMode = false
@@ -360,6 +387,7 @@ final class AppState {
         didSet {
             selectedLanguageLabel = langLabel(selectedLanguage)
             selectedLanguageShort = langShort(selectedLanguage)
+            floatingPanel.setRecognitionOnly(isRecognitionOnly)
         }
     }
     var selectedLanguageLabel: String = "🇺🇸 英语（美国）"
@@ -456,6 +484,9 @@ final class AppState {
         self.subtitleWindowLocked = defaults.bool(forKey: "RTT.subtitleWindowLocked")
         let styleRaw = defaults.string(forKey: "RTT.subtitleStylePreset") ?? SubtitleStylePreset.standard.rawValue
         self.subtitleStylePreset = SubtitleStylePreset(rawValue: styleRaw) ?? .standard
+        let modeRaw = defaults.string(forKey: "RTT.processingMode") ?? ProcessingMode.translation.rawValue
+        self.processingMode = ProcessingMode(rawValue: modeRaw) ?? .translation
+        floatingPanel.setRecognitionOnly(isRecognitionOnly)
     }
 
     func setupCallbacks() {
@@ -509,12 +540,14 @@ final class AppState {
             }
             guard generation == sessionGeneration else { return }
 
-            // 2. 准备翻译引擎
-            let sourceLang = Locale.Language(identifier: language)
-            try await translationService.prepare(
-                sourceLanguage: sourceLang,
-                targetLanguage: .init(identifier: "zh-Hans")
-            )
+            // 2. 翻译模式才准备在线翻译引擎；仅识别模式完全离线。
+            if !isRecognitionOnly {
+                let sourceLang = Locale.Language(identifier: language)
+                try await translationService.prepare(
+                    sourceLanguage: sourceLang,
+                    targetLanguage: .init(identifier: "zh-Hans")
+                )
+            }
             guard generation == sessionGeneration else { return }
 
             // 3. 根据当前展示模式更新字幕窗口
@@ -686,7 +719,9 @@ final class AppState {
         floatingPanel.updateLive(text: liveText, langId: language)
         panelRefreshCounter += 1
         pendingPreviewText = liveText
-        schedulePreview(language: language, generation: generation)
+        if !isRecognitionOnly {
+            schedulePreview(language: language, generation: generation)
+        }
 
         for sentence in sentences {
             let timing = subtitleTiming(
@@ -1013,7 +1048,7 @@ final class AppState {
 
     private func showError(_ message: String) {
         let alert = NSAlert()
-        alert.messageText = "翻译出错"
+        alert.messageText = isRecognitionOnly ? "识别出错" : "翻译出错"
         alert.informativeText = message
         alert.alertStyle = .warning
         alert.addButton(withTitle: "确定")
@@ -1101,6 +1136,16 @@ final class AppState {
     }
 
     private func performTranslation(of request: TranslationRequest) async -> TranslationEntry? {
+        if isRecognitionOnly {
+            return .init(
+                orderID: request.id,
+                source: request.text,
+                target: request.text,
+                startTime: request.startTime,
+                endTime: request.endTime
+            )
+        }
+
         do {
             if let result = try await translationService.translate(request.text) {
                 return .init(

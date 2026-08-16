@@ -94,7 +94,7 @@ enum TranscriptExporter {
             lines.append("")
             lines.append(source)
             lines.append("")
-            if !target.isEmpty, !target.hasPrefix("⚠️") {
+            if !target.isEmpty, !target.hasPrefix("⚠️"), target != source {
                 lines.append("译文：")
                 lines.append("")
                 lines.append(target)
@@ -108,7 +108,7 @@ enum TranscriptExporter {
     private static func exportedText(for entry: TranslationEntry) -> String {
         let source = entry.source.trimmingCharacters(in: .whitespacesAndNewlines)
         let target = entry.target.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !target.isEmpty, !target.hasPrefix("⚠️") else { return source }
+        guard !target.isEmpty, !target.hasPrefix("⚠️"), target != source else { return source }
         return "\(source)\n\(target)"
     }
 
