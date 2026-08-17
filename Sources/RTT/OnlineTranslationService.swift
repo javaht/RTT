@@ -58,7 +58,6 @@ final class OnlineTranslationService: @unchecked Sendable {
             "-source", src,
             "-target", tgt,
             "-no-rlwrap",
-            text,
         ]
 
         // 设置 PATH 让 trans 能找到我们的内置 gawk
@@ -69,6 +68,9 @@ final class OnlineTranslationService: @unchecked Sendable {
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = Pipe()
+
+        let inputPipe = Pipe()
+        process.standardInput = inputPipe
 
         let timeoutFlag = TranslationTimeoutFlag()
 
@@ -81,6 +83,10 @@ final class OnlineTranslationService: @unchecked Sendable {
                     }
                     do {
                         try process.run()
+                        // Pass text via stdin instead of command-line arguments (P0-安全)
+                        let textData = Data(text.utf8)
+                        inputPipe.fileHandleForWriting.write(textData)
+                        try inputPipe.fileHandleForWriting.close()
                     } catch {
                         outputTask.cancel()
                         throw error
