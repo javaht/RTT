@@ -84,8 +84,8 @@ enum TranscriptExporter {
         lines.append("")
 
         for entry in entries {
-            let source = entry.source.trimmingCharacters(in: .whitespacesAndNewlines)
-            let target = entry.target.trimmingCharacters(in: .whitespacesAndNewlines)
+            let source = entry.cleanedSource
+            let target = entry.cleanedTarget
             let start = srtTimestamp(max(0, entry.startTime))
             let end = srtTimestamp(max(entry.startTime + 0.1, entry.endTime))
             lines.append("## \(start) - \(end)")
@@ -94,7 +94,7 @@ enum TranscriptExporter {
             lines.append("")
             lines.append(source)
             lines.append("")
-            if !target.isEmpty, !target.hasPrefix("⚠️"), target != source {
+            if !target.isEmpty, target != source {
                 lines.append("译文：")
                 lines.append("")
                 lines.append(target)
@@ -106,9 +106,9 @@ enum TranscriptExporter {
     }
 
     private static func exportedText(for entry: TranslationEntry) -> String {
-        let source = entry.source.trimmingCharacters(in: .whitespacesAndNewlines)
-        let target = entry.target.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !target.isEmpty, !target.hasPrefix("⚠️"), target != source else { return source }
+        let source = entry.cleanedSource
+        let target = entry.cleanedTarget
+        guard !target.isEmpty, target != source else { return source }
         return "\(source)\n\(target)"
     }
 

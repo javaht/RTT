@@ -1,4 +1,4 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import CoreMedia
 import os
 import ScreenCaptureKit
@@ -110,6 +110,13 @@ final class SegmentTable: @unchecked Sendable {
 }
 
 /// 捕获系统音频，并使用 macOS 26 的 SpeechAnalyzer 实时识别。
+///
+/// 并发模型：`stream(_:didOutputSampleBuffer:)` 在 SCStream 全局队列被调用，
+/// 其访问的转换状态（converter/format/inputBuilder/isRunning）用 Mutex 保护，
+/// 不再依赖 `@unchecked Sendable` 掩盖竞争。
+///
+/// 类本身标记 `@unchecked Sendable`：受 Mutex 保护的状态访问在并发上下文下安全，
+/// 供 AppState（@MainActor）将其发送到非隔离的 start/stopAndWait 方法。
 final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendable {
     var onTranscript: (@Sendable (TimedTranscriptUpdate) -> Void)?
     var onError: (@Sendable (String) -> Void)?
@@ -163,12 +170,30 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
     }
 
     // MARK: - 音频流
+    //
+    // 以下属性同时被 MainActor 上的 start/stop 和 SCStream 全局队列回调读写，
+    // 用 Mutex 保护以消除数据竞争（原先依赖 @unchecked Sendable 掩盖）。
+    // stream 回调内只取快照，不在持锁状态下做长耗时操作。
 
     private var stream: SCStream?
-    private var converter: AVAudioConverter?
-    private var analyzerFormat: AVAudioFormat?
-    private var isRunning = false
-    private var stopTask: Task<Void, Never>?
+    /// 音频回调用到的转换状态快照：回调读取，start/stop 写入。
+    private let converterMutex = Mutex<AVAudioConverter?>(nil)
+    private let analyzerFormatMutex = Mutex<AVAudioFormat?>(nil)
+    private let inputBuilderMutex = Mutex<AsyncStream<AnalyzerInput>.Continuation?>(nil)
+    private let isRunningMutex = Mutex<Bool>(false)
+
+    /// 读取回调需要的转换状态快照。任一为 nil 即视作已停止，回调直接返回。
+    private func conversionSnapshot() -> (converter: AVAudioConverter, format: AVAudioFormat, builder: AsyncStream<AnalyzerInput>.Continuation)? {
+        let converter = converterMutex.withLock { $0 }
+        let format = analyzerFormatMutex.withLock { $0 }
+        let builder = inputBuilderMutex.withLock { $0 }
+        guard let converter, let format, let builder else { return nil }
+        return (converter, format, builder)
+    }
+
+    /// 停止采集的收尾任务，用 Mutex 保护以跨线程安全访问（start/stop 在 MainActor，
+    /// 但 stopAndWait 可从异步上下文 await；访问统一走锁）。
+    private let stopTaskMutex = Mutex<Task<Void, Never>?>(nil)
 
     /// 支持的识别语言列表
     static let supportedLanguages: [(id: String, label: String)] = [
@@ -383,12 +408,12 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
     // MARK: - 生命周期
 
     func start(locale: Locale) async throws {
-        await stopTask?.value
-        guard !isRunning else { return }
+        await stopTaskMutex.withLock { $0 }?.value
+        guard !(isRunningMutex.withLock { $0 }) else { return }
 
         let sessionID = UUID()
         activeSessionID = sessionID
-        isRunning = true
+        isRunningMutex.withLock { $0 = true }
         segmentTable.reset()
 
         guard let transcriber = await Self.makeTranscriber(locale: locale) else {
@@ -415,8 +440,8 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
         }
 
         self.analyzer = analyzer
-        self.analyzerFormat = analyzerFormat
-        self.inputBuilder = inputBuilder
+        self.analyzerFormatMutex.withLock { $0 = analyzerFormat }
+        self.inputBuilderMutex.withLock { $0 = inputBuilder }
         resultTask = makeResultTask(for: transcriber, sessionID: sessionID)
 
         guard activeSessionID == sessionID else { throw CancellationError() }
@@ -426,7 +451,7 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
             content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         } catch {
             clearSession(ifMatching: sessionID)
-            throw TranscriberError.screenRecordingPermissionDenied
+            throw TranscriberError.captureFailed(error.localizedDescription)
         }
         guard let display = content.displays.first else {
             clearSession(ifMatching: sessionID)
@@ -449,7 +474,7 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
             try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: .global(qos: .userInitiated))
         } catch {
             clearSession(ifMatching: sessionID)
-            throw TranscriberError.screenRecordingPermissionDenied
+            throw TranscriberError.captureFailed(error.localizedDescription)
         }
 
         self.stream = stream
@@ -457,7 +482,7 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
             try await stream.startCapture()
         } catch {
             clearSession(ifMatching: sessionID)
-            throw TranscriberError.screenRecordingPermissionDenied
+            throw TranscriberError.captureFailed(error.localizedDescription)
         }
 
         guard activeSessionID == sessionID else {
@@ -471,27 +496,31 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
         let analyzerToStop = analyzer
 
         activeSessionID = nil
-        isRunning = false
+        isRunningMutex.withLock { $0 = false }
         stream = nil
         analyzer = nil
-        analyzerFormat = nil
-        converter = nil
-        inputBuilder?.finish()
-        inputBuilder = nil
+        analyzerFormatMutex.withLock { $0 = nil }
+        converterMutex.withLock { $0 = nil }
+        inputBuilderMutex.withLock { state in
+            state?.finish()
+            state = nil
+        }
         resultTask?.cancel()
         resultTask = nil
 
-        let previousStopTask = stopTask
-        stopTask = Task {
+        let previousStopTask = stopTaskMutex.withLock { $0 }
+        let newStopTask = Task {
             await previousStopTask?.value
             try? await streamToStop?.stopCapture()
             await analyzerToStop?.cancelAndFinishNow()
         }
+        stopTaskMutex.withLock { $0 = newStopTask }
     }
 
     func stopAndWait() async {
         stop()
-        await stopTask?.value
+        let task = stopTaskMutex.withLock { $0 }
+        await task?.value
     }
 
     private func clearSession(ifMatching sessionID: UUID) {
@@ -527,54 +556,14 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
                 guard activeSessionID == sessionID else { return }
                 let text = String(result.text.characters)
                 let fullRange = combinedRange(finalizedRange, result.range)
-
                 Self.logSegmentEvent(
                     "speech isFinal=\(result.isFinal) range=\(String(describing: result.range)) " +
                     "text=\"\(text)\" finalizedLen=\(finalizedText.count)"
                 )
-
-                if result.isFinal {
-                    let revision = segmentTable.consumeVolatile(overlapping: result.range)
-                    if revision {
-                        let oldLenBefore = finalizedText.count
-                        if let splice = segmentTable.findSplice(for: result.range) {
-                            finalizedText = String(finalizedText.prefix(splice.offset))
-                                + text
-                                + String(finalizedText.dropFirst(splice.offset + splice.oldLen))
-                            Self.logSegmentEvent(
-                                "speech REVISION splice offset=\(splice.offset) " +
-                                "oldLen=\(splice.oldLen) newLen=\(text.count) " +
-                                "oldTotal=\(oldLenBefore) newTotal=\(finalizedText.count)"
-                            )
-                        } else {
-                            finalizedText += text
-                            Self.logSegmentEvent("speech REVISION no-splice fallback append")
-                        }
-                    } else {
-                        finalizedText += text
-                    }
-
-                    finalizedRange = fullRange
-                    segmentTable.append(
-                        range: result.range,
-                        text: text,
-                        textOffset: finalizedText.count - text.count
-                    )
-                    onTranscript?(.init(
-                        text: finalizedText,
-                        finalizedText: finalizedText,
-                        isPartial: false,
-                        audioRange: fullRange,
-                        isRevision: revision
-                    ))
-                } else {
-                    onTranscript?(.init(
-                        text: finalizedText + text,
-                        finalizedText: finalizedText,
-                        isPartial: true,
-                        audioRange: fullRange
-                    ))
-                }
+                self.processResult(
+                    result, kind: "speech", text: text, fullRange: fullRange,
+                    finalizedText: &finalizedText, finalizedRange: &finalizedRange, sessionID: sessionID
+                )
             }
         } catch {
             guard !Task.isCancelled, activeSessionID == sessionID else { return }
@@ -595,59 +584,74 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
                 guard activeSessionID == sessionID else { return }
                 let text = String(result.text.characters)
                 let fullRange = combinedRange(finalizedRange, result.range)
-
                 Self.logSegmentEvent(
                     "dictation isFinal=\(result.isFinal) range=\(String(describing: result.range)) " +
                     "text=\"\(text)\" finalizedLen=\(finalizedText.count)"
                 )
-
-                if result.isFinal {
-                    let revision = segmentTable.consumeVolatile(overlapping: result.range)
-                    if revision {
-                        let oldLenBefore = finalizedText.count
-                        if let splice = segmentTable.findSplice(for: result.range) {
-                            finalizedText = String(finalizedText.prefix(splice.offset))
-                                + text
-                                + String(finalizedText.dropFirst(splice.offset + splice.oldLen))
-                            Self.logSegmentEvent(
-                                "dictation REVISION splice offset=\(splice.offset) " +
-                                "oldLen=\(splice.oldLen) newLen=\(text.count) " +
-                                "oldTotal=\(oldLenBefore) newTotal=\(finalizedText.count)"
-                            )
-                        } else {
-                            finalizedText += text
-                            Self.logSegmentEvent("dictation REVISION no-splice fallback append")
-                        }
-                    } else {
-                        finalizedText += text
-                    }
-
-                    finalizedRange = fullRange
-                    segmentTable.append(
-                        range: result.range,
-                        text: text,
-                        textOffset: finalizedText.count - text.count
-                    )
-                    onTranscript?(.init(
-                        text: finalizedText,
-                        finalizedText: finalizedText,
-                        isPartial: false,
-                        audioRange: fullRange,
-                        isRevision: revision
-                    ))
-                } else {
-                    onTranscript?(.init(
-                        text: finalizedText + text,
-                        finalizedText: finalizedText,
-                        isPartial: true,
-                        audioRange: fullRange
-                    ))
-                }
+                self.processResult(
+                    result, kind: "dictation", text: text, fullRange: fullRange,
+                    finalizedText: &finalizedText, finalizedRange: &finalizedRange, sessionID: sessionID
+                )
             }
         } catch {
             guard !Task.isCancelled, activeSessionID == sessionID else { return }
             onError?(error.localizedDescription)
             stop()
+        }
+    }
+
+    /// 处理一条转写结果：把原先在 consumeSpeechResults / consumeDictationResults
+    /// 中逐字复制的 ~60 行修订/拼接/追加/回调逻辑抽到此处，消除重复。
+    private func processResult(
+        _ result: some SpeechModuleResult,
+        kind: String,
+        text: String,
+        fullRange: CMTimeRange,
+        finalizedText: inout String,
+        finalizedRange: inout CMTimeRange?,
+        sessionID: UUID
+    ) {
+        if result.isFinal {
+            let revision = segmentTable.consumeVolatile(overlapping: result.range)
+            if revision {
+                let oldLenBefore = finalizedText.count
+                if let splice = segmentTable.findSplice(for: result.range) {
+                    finalizedText = String(finalizedText.prefix(splice.offset))
+                        + text
+                        + String(finalizedText.dropFirst(splice.offset + splice.oldLen))
+                    Self.logSegmentEvent(
+                        "\(kind) REVISION splice offset=\(splice.offset) " +
+                        "oldLen=\(splice.oldLen) newLen=\(text.count) " +
+                        "oldTotal=\(oldLenBefore) newTotal=\(finalizedText.count)"
+                    )
+                } else {
+                    finalizedText += text
+                    Self.logSegmentEvent("\(kind) REVISION no-splice fallback append")
+                }
+            } else {
+                finalizedText += text
+            }
+
+            finalizedRange = fullRange
+            segmentTable.append(
+                range: result.range,
+                text: text,
+                textOffset: finalizedText.count - text.count
+            )
+            onTranscript?(.init(
+                text: finalizedText,
+                finalizedText: finalizedText,
+                isPartial: false,
+                audioRange: fullRange,
+                isRevision: revision
+            ))
+        } else {
+            onTranscript?(.init(
+                text: finalizedText + text,
+                finalizedText: finalizedText,
+                isPartial: true,
+                audioRange: fullRange
+            ))
         }
     }
 
@@ -660,9 +664,14 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
     // MARK: - SCStreamOutput
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .audio, isRunning, self.stream === stream else { return }
-        guard sampleBuffer.isValid, sampleBuffer.numSamples > 0 else { return }
-        guard let targetFormat = analyzerFormat else { return }
+        guard type == .audio else { return }
+        // 先取快照（受锁保护），避免与 start/stop 的写入竞争。
+        guard !(isRunningMutex.withLock { $0 }) else { return }
+        guard self.stream === stream else { return }
+        guard let snapshot = conversionSnapshot() else { return }
+        let converter = snapshot.converter
+        let targetFormat = snapshot.format
+        let inputBuilder = snapshot.builder
 
         guard let formatDescription = sampleBuffer.formatDescription,
               let streamDesc = formatDescription.audioStreamBasicDescription,
@@ -671,11 +680,37 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
                   channels: streamDesc.mChannelsPerFrame
               ) else { return }
 
-        if converter == nil || converter?.inputFormat != sourceFormat || converter?.outputFormat != targetFormat {
-            converter = AVAudioConverter(from: sourceFormat, to: targetFormat)
+        if converter.inputFormat != sourceFormat || converter.outputFormat != targetFormat {
+            // 输入格式变化（如设备切换）：重建 converter。
+            let newConverter = AVAudioConverter(from: sourceFormat, to: targetFormat)
+            converterMutex.withLock { $0 = newConverter }
+            guard let newConverter else { return }
+            return convertAndYield(
+                sampleBuffer: sampleBuffer,
+                sourceFormat: sourceFormat,
+                targetFormat: targetFormat,
+                converter: newConverter,
+                inputBuilder: inputBuilder
+            )
         }
-        guard let converter else { return }
 
+        convertAndYield(
+            sampleBuffer: sampleBuffer,
+            sourceFormat: sourceFormat,
+            targetFormat: targetFormat,
+            converter: converter,
+            inputBuilder: inputBuilder
+        )
+    }
+
+    /// 实际的音频转换与投递。抽取出来以便 converter 重建后复用。
+    private func convertAndYield(
+        sampleBuffer: CMSampleBuffer,
+        sourceFormat: AVAudioFormat,
+        targetFormat: AVAudioFormat,
+        converter: AVAudioConverter,
+        inputBuilder: AsyncStream<AnalyzerInput>.Continuation
+    ) {
         do {
             try sampleBuffer.withAudioBufferList { audioBufferList, _ in
                 guard let sourceBuffer = AVAudioPCMBuffer(
@@ -689,32 +724,43 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
                 guard let converted = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else { return }
 
                 var error: NSError?
-                nonisolated(unsafe) var consumed = false
-                nonisolated(unsafe) let src = sourceBuffer
+                // 用一个引用类型 box 持有 consumed 标志，避免在 @Sendable 的 convert
+                // 回调中捕获/修改可变 var 产生的 Sendable 警告。
+                let consumed = ConsumedFlag()
                 converter.convert(to: converted, error: &error) { _, status in
-                    if consumed {
+                    if consumed.value {
                         status.pointee = .noDataNow
                         return nil
                     }
-                    consumed = true
+                    consumed.value = true
                     status.pointee = .haveData
-                    return src
+                    return sourceBuffer
                 }
 
                 if error == nil, converted.frameLength > 0 {
-                    inputBuilder?.yield(AnalyzerInput(buffer: converted))
+                    inputBuilder.yield(AnalyzerInput(buffer: converted))
                 }
             }
         } catch {
-            // 跳过损坏的音频缓冲
+            // 跳过损坏的音频缓冲；静默丢帧过多时通过日志暴露。
+            Self.segmentLogger.debug("音频缓冲转换失败: \(error.localizedDescription, privacy: .public)")
         }
     }
+}
+
+/// convert 回调用的一次性消费标志：引用类型，使 @Sendable 回调闭包能安全读写单帧内的状态，
+/// 避免 nonisolated(unsafe) 与可变 var 捕获导致的 Sendable 警告。
+/// 生命周期仅限单次 convert 调用，不存在跨调用复用，故无需加锁。
+private final class ConsumedFlag: @unchecked Sendable {
+    var value = false
 }
 
 enum TranscriberError: LocalizedError {
     case recognizerNotAvailable(String)
     case languageModelNotInstalled(String)
     case screenRecordingPermissionDenied
+    /// SCStream 启动/采集失败，且非权限原因（如显示设备变更、GPU 资源不足、配置无效）。
+    case captureFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -724,6 +770,10 @@ enum TranscriberError: LocalizedError {
             "\(locale) 语音模型尚未安装，请重新选择该语言并完成下载。"
         case .screenRecordingPermissionDenied:
             "需要屏幕录制权限才能监听系统音频。请在系统设置 → 隐私与安全性 → 屏幕录制 中为本应用授权。"
+        case let .captureFailed(detail):
+            "系统音频采集失败：\(detail)。请确认没有其他应用占用屏幕录制，或稍后重试。"
         }
     }
 }
+
+

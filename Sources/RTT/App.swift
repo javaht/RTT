@@ -202,6 +202,23 @@ struct CommittedTextTracker {
     mutating func markAppended(orderID: Int) {
         guard let i = lines.firstIndex(where: { $0.orderID == orderID }) else { return }
         lines[i].appended = true
+        pruneOldLines()
+    }
+
+    /// 行记录上限：与 FloatingPanel 的条目上限对齐，避免长视频下 lines 无界增长。
+    /// 被裁剪的行均为已显示的旧条目，不再参与回滚（回滚只针对最近未稳定的尾部）。
+    private static let maxLines = 500
+
+    /// 裁剪最旧、已显示且不会再回滚的行记录。
+    /// 必须保留所有未显示（appended == false）或靠尾部的行，避免破坏回滚/重提交。
+    private mutating func pruneOldLines() {
+        guard lines.count > Self.maxLines else { return }
+        // 只裁剪已追加到面板的旧行；保留尾部窗口与所有未追加行。
+        let toRemove = lines.filter { $0.appended }
+            .prefix(lines.count - Self.maxLines)
+        let removeIDs = Set(toRemove.map { $0.orderID })
+        guard !removeIDs.isEmpty else { return }
+        lines.removeAll { removeIDs.contains($0.orderID) }
     }
 
     /// 回滚到 retainedCount 位置：截断 committed 字符串，删除所有超出共同前缀的行。
@@ -419,7 +436,9 @@ final class AppState {
 
     /// 用于菜单 disable 判断的正式条目副本
     var entriesForCopy: [TranslationEntry] {
-        floatingPanel.entries
+        // 限制返回最近 N 条，避免长视频下全量复制带来的开销；
+        // 复制/导出功能仍覆盖最近窗口内的字幕。
+        Array(floatingPanel.entries.suffix(200))
     }
 
     // MARK: - 视频控制面板只读数据
@@ -439,7 +458,7 @@ final class AppState {
     }
     /// 是否存在翻译失败的正式条目（用于控制面板“重试失败翻译”按钮启用判断）。
     var hasFailedTranslations: Bool {
-        floatingPanel.entries.contains { $0.target.hasPrefix("⚠️") }
+        floatingPanel.entries.contains { $0.isFailure }
     }
 
     let floatingPanel = FloatingPanelManager()
@@ -457,6 +476,9 @@ final class AppState {
     /// 预览去重与冷却
     private var lastPreviewSource = ""
     private var lastPreviewStart: UInt64?
+    /// 最近一次预览翻译结果（含其源文本）：正式提交同源句子时可复用，避免重复网络请求。
+    private var lastPreviewTranslation: String?
+    private var lastPreviewTranslationSource: String?
 
     // MARK: 并发翻译
     private let maxConcurrentTranslations = 3
@@ -473,10 +495,6 @@ final class AppState {
     private var timelineStartUptime: UInt64?
 
     var canExport = false
-
-    /// 控制面板刷新计数器：每次浮层面板数据变更时递增，
-    /// 控制面板通过读取此值触发 SwiftUI 重新渲染（FloatingPanelManager 非 @Observable）。
-    var panelRefreshCounter = 0
 
     init() {
         let defaults = UserDefaults.standard
@@ -717,7 +735,6 @@ final class AppState {
         let liveText = String(trimmed.dropFirst(liveStart))
             .trimmingCharacters(in: .whitespacesAndNewlines)
         floatingPanel.updateLive(text: liveText, langId: language)
-        panelRefreshCounter += 1
         pendingPreviewText = liveText
         if !isRecognitionOnly {
             schedulePreview(language: language, generation: generation)
@@ -790,7 +807,6 @@ final class AppState {
         }
 
         resetPreviewState()
-        panelRefreshCounter += 1
     }
 
     private func subtitleTiming(
@@ -852,7 +868,8 @@ final class AppState {
 
                 if let result, !result.isEmpty {
                     self.floatingPanel.updateProvisional(source: source, target: result)
-                    self.panelRefreshCounter += 1
+                    self.lastPreviewTranslation = result
+                    self.lastPreviewTranslationSource = source
                 }
             } catch {
                 // 预翻译失败不打断正式翻译，后续识别文本更新时会再次尝试。
@@ -867,15 +884,13 @@ final class AppState {
     }
 
     private func resetPreviewState() {
-        let hadProvisionalEntry = floatingPanel.provisionalEntry != nil
         previewEpoch += 1
         previewTask?.cancel()
         previewTask = nil
         pendingPreviewText = ""
+        lastPreviewTranslation = nil
+        lastPreviewTranslationSource = nil
         floatingPanel.clearProvisional()
-        if hadProvisionalEntry {
-            panelRefreshCounter += 1
-        }
     }
 
     // MARK: - 视频场景配置
@@ -949,9 +964,9 @@ final class AppState {
     }
 
     private func copyText(for entry: TranslationEntry) -> String {
-        let source = entry.source.trimmingCharacters(in: .whitespacesAndNewlines)
-        let target = entry.target.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !target.isEmpty, !target.hasPrefix("⚠️") else { return source }
+        let source = entry.cleanedSource
+        let target = entry.cleanedTarget
+        guard !target.isEmpty, target != source else { return source }
         return "\(source)\n\(target)"
     }
 
@@ -974,9 +989,24 @@ final class AppState {
 
     /// 重新翻译所有标记为失败的正式条目。
     func retryFailedTranslations() {
-        let failedEntries = floatingPanel.entries.filter { $0.target.hasPrefix("⚠️") }
+        let failedEntries = floatingPanel.entries.filter { $0.isFailure }
         guard !failedEntries.isEmpty else { return }
+
+        // 整体递增 epoch，丢弃当前在途（尚未提交）的翻译结果，
+        // 避免它们在 retry 结果之后到达又把 nextID 推过 retry 的 id。
+        translationEpoch += 1
         let epoch = translationEpoch
+
+        // 回退有序缓冲与 id 游标到最早失败条目，
+        // 否则 commit(entry, id: oldID < nextID) 会永久卡在 results 里永不排空。
+        let minFailedID = failedEntries.map(\.orderID).min() ?? nextTranslationID
+        translationBuffer.rewind(to: minFailedID)
+        if nextTranslationID > minFailedID { nextTranslationID = minFailedID }
+
+        // 移除面板中旧的 ⚠️ 失败条目，避免与重试成功结果出现 orderID 重复。
+        let failedIDs = Set(failedEntries.map(\.orderID))
+        floatingPanel.removeEntries(withOrderIDs: failedIDs)
+
         for entry in failedEntries {
             enqueueTranslation(
                 entry.source,
@@ -1028,16 +1058,11 @@ final class AppState {
     }
 
     func openREADME() {
-        let possiblePaths = [
-            "/Users/zhou/IdeaProjects/claudespace/RTT/README.md",
-            Bundle.main.bundlePath + "/Contents/Resources/README.md",
-        ]
-        for path in possiblePaths {
-            let url = URL(fileURLWithPath: path)
-            if FileManager.default.fileExists(atPath: path) {
-                NSWorkspace.shared.open(url)
-                return
-            }
+        // 仅在 Bundle 内查找 README，不依赖开发机本地路径。
+        let path = Bundle.main.bundlePath + "/Contents/Resources/README.md"
+        if FileManager.default.fileExists(atPath: path) {
+            NSWorkspace.shared.open(URL(fileURLWithPath: path))
+            return
         }
         showInformation(title: "找不到 README", message: "README.md 文件不存在。")
     }
@@ -1070,7 +1095,6 @@ final class AppState {
         floatingPanel.isTranslating = false
         floatingPanel.updateLive(text: "")
         floatingPanel.hide()
-        panelRefreshCounter += 1
         if shouldRestoreControlPanel {
             leaveFloatingTranslationMode()
             onRequestShowControlPanel?()
@@ -1082,7 +1106,7 @@ final class AppState {
     private func startTranslationWorkers() {
         translationQueue = TranslationQueue()
         for _ in 0..<maxConcurrentTranslations {
-            translationWorkers.append(Task { [weak self] in
+            translationWorkers.append(Task { @MainActor [weak self] in
                 while let self, !Task.isCancelled {
                     guard let request = await self.translationQueue.next() else { break }
                     guard !Task.isCancelled else { break }
@@ -1136,6 +1160,20 @@ final class AppState {
     }
 
     private func performTranslation(of request: TranslationRequest) async -> TranslationEntry? {
+        // 复用预览结果去重：若该句子与最近一次预览同源且预览结果有效，直接用预览结果，
+        // 避免对同一文本再次 fork 子进程发请求。
+        if let previewSource = lastPreviewTranslationSource,
+           let previewResult = lastPreviewTranslation,
+           previewSource == request.text, !previewResult.hasPrefix(TranslationEntry.failurePrefix) {
+            return .init(
+                orderID: request.id,
+                source: request.text,
+                target: previewResult,
+                startTime: request.startTime,
+                endTime: request.endTime
+            )
+        }
+
         if isRecognitionOnly {
             return .init(
                 orderID: request.id,
@@ -1189,7 +1227,6 @@ final class AppState {
             textTracker.markAppended(orderID: entry.orderID)
         }
         canExport = true
-        panelRefreshCounter += 1
     }
 
     func selectLanguage(_ id: String) {
@@ -1290,9 +1327,20 @@ final class AppState {
     }
 
     private func langShort(_ id: String) -> String {
+        LanguageDisplay.short(for: id)
+    }
+}
+
+/// 语言显示信息：统一菜单栏短码、悬浮窗语言标签与翻译引擎代码，
+/// 消除原先散布在 App.langShort / FloatingPanel.langLabel / OnlineTranslationService.langCode
+/// 的三套不一致映射（其中 langShort 的 en-GB 与 uk-UA 曾都映射为 "UK"）。
+enum LanguageDisplay {
+    /// 菜单栏 / 悬浮窗使用的语言短码（大写），与 supportedLanguages 对齐。
+    static func short(for id: String) -> String {
         switch id {
+        case "zh-CN": "ZH"
         case "en-US": "US"
-        case "en-GB": "UK"
+        case "en-GB": "GB"
         case "ru-RU": "RU"
         case "de-DE": "DE"
         case "es-ES": "ES"
@@ -1307,7 +1355,7 @@ final class AppState {
         case "th-TH": "TH"
         case "vi-VN": "VI"
         case "ar-SA": "AR"
-        case "uk-UA": "UK"
+        case "uk-UA": "UA"
         case "hi-IN": "HI"
         case "id-ID": "ID"
         default: String(id.prefix(2)).uppercased()

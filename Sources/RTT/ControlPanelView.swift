@@ -41,8 +41,8 @@ struct ControlPanelView: View {
     var appState: AppState
 
     var body: some View {
-        // 订阅面板数据刷新计数器，确保翻译条目变更时视图更新
-        let _ = appState.panelRefreshCounter
+        // 通过访问 AppState/FloatingPanelManager 的 @Observable 属性自动订阅刷新，
+        // 不再依赖手动刷新计数器。
         return VStack(spacing: 0) {
             header
             HStack(spacing: 20) {
@@ -212,7 +212,7 @@ struct ControlPanelView: View {
         Text(text)
             .font(.system(size: isTarget ? 17 : 16, weight: isTarget ? .semibold : .regular))
             .foregroundColor(
-                text.hasPrefix("⚠️")
+                text.hasPrefix(TranslationEntry.failurePrefix)
                     ? CPColor.danger
                     : (isProvisional ? CPColor.mutedText : CPColor.primaryText)
             )

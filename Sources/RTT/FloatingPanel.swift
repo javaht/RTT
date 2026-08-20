@@ -251,10 +251,32 @@ struct TranslationEntry: Identifiable, Equatable {
     var target: String
     var startTime: TimeInterval = 0
     var endTime: TimeInterval = 0
+
+    /// 失败标记前缀，与各处失败检测保持一致，避免散落的 hasPrefix 判断漏判。
+    static let failurePrefix = "⚠️"
+
+    /// 该条目是否为翻译失败（译文以失败标记开头）。
+    var isFailure: Bool {
+        target.hasPrefix(Self.failurePrefix)
+    }
+
+    /// 去除首尾空白后的干净文本；失败条目回退为原文。
+    /// 用于复制/导出/渲染等所有消费点，统一行为。
+    var cleanedTarget: String {
+        let trimmed = target.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !isFailure else { return source.trimmingCharacters(in: .whitespacesAndNewlines) }
+        return trimmed
+    }
+
+    /// 干净原文。
+    var cleanedSource: String {
+        source.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 }
 
 /// 管理置顶悬浮窗（NSPanel），显示可滚动的翻译历史。
 @MainActor
+@Observable
 final class FloatingPanelManager {
     private var panel: NSPanel?
     private var hostingView: NSHostingView<TranscriptView>?
@@ -439,9 +461,21 @@ final class FloatingPanelManager {
     }
 
     /// 追加一条完整翻译（原文 + 译文）。
+    /// 长时间运行时裁剪最旧条目，避免 entries 数组无界增长导致内存压力。
     func append(entry: TranslationEntry) {
         entries.append(entry)
+        pruneExcessEntries()
         update()
+    }
+
+    /// 历史条目上限：超出后丢弃最旧条目，保持滚动记录而非无限累积。
+    /// 原始顺序信息通过裁剪保留在最近窗口内；导出仍可基于当前内存中的条目。
+    private static let maxEntries = 500
+
+    private func pruneExcessEntries() {
+        guard entries.count > Self.maxEntries else { return }
+        let dropCount = entries.count - Self.maxEntries
+        entries.removeFirst(dropCount)
     }
 
     /// 删除指定 orderID 的条目（用于回滚时撤销错误字幕）。
@@ -701,7 +735,7 @@ struct TranscriptView: View {
                                 Circle()
                                     .fill(Color.orange)
                                     .frame(width: 6, height: 6)
-                                Text(langLabel(liveLangId))
+                                Text(LanguageDisplay.short(for: liveLangId))
                                     .font(.caption2)
                                     .foregroundColor(.orange.opacity(0.7))
                                 Text(liveText)
@@ -781,13 +815,6 @@ struct TranscriptView: View {
     }
 
     private func langLabel(_ id: String) -> String {
-        switch id {
-        case "en-US": "EN"
-        case "ru-RU": "RU"
-        case "de-DE": "DE"
-        case "es-ES": "ES"
-        case "ja-JP": "JA"
-        default: id
-        }
+        LanguageDisplay.short(for: id)
     }
 }

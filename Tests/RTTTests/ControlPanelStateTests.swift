@@ -15,7 +15,9 @@ struct ControlPanelStateTests {
     @Test
     func displayTimestampFormatsHHMMSS() {
         #expect(TranscriptExporter.displayTimestamp(0) == "00:00:00")
-        #expect(TranscriptExporter.displayTimestamp(72.7) == "00:01:12")
+        // 72.7s 四舍五入到 73s → 00:01:13（displayTimestamp 用 .rounded() 取整秒）
+        #expect(TranscriptExporter.displayTimestamp(72.7) == "00:01:13")
+        #expect(TranscriptExporter.displayTimestamp(72.4) == "00:01:12")
         #expect(TranscriptExporter.displayTimestamp(3661) == "01:01:01")
     }
 

@@ -297,7 +297,15 @@ struct TranscriptLogicTests {
 
     @Test
     func translateThrowsResourcesMissingWhenScriptMissing() async {
+        // findResourcesDir 在打包了真实 Resources 的测试环境中总会命中真实脚本，
+        // 无法稳定触发 missing 分支。通过环境变量注入缺失场景，确保稳定抛 resourcesMissing。
         let service = OnlineTranslationService()
+        let prev = ProcessInfo.processInfo.environment["RTT_TEST_MISSING_RESOURCES"]
+        setenv("RTT_TEST_MISSING_RESOURCES", "1", 1)
+        defer {
+            if let prev { setenv("RTT_TEST_MISSING_RESOURCES", prev, 1) }
+            else { unsetenv("RTT_TEST_MISSING_RESOURCES") }
+        }
         do {
             _ = try await service.translate(text: "hi", from: "en-US", to: "zh-Hans")
             Issue.record("缺少内置资源时应抛出 resourcesMissing 错误")
