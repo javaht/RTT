@@ -17,11 +17,15 @@ struct Glossary: Codable, Equatable, Sendable {
 
     /// 对译文应用全部替换。按 `wrong` 长度降序进行，避免短串先替换破坏包含它的长串。
     /// 空的 `wrong` 跳过，防止误替换。
+    ///
+    /// 大小写不敏感（spec B 用户故事 10）："OpenAI"/"openai" 录一条即可全命中。
+    /// 注意：拉丁字母短词可能误命中（如 wrong="AI" 会命中 "said" 里的 "ai"），
+    /// 错译侧多为中文时无此问题；录入 2–3 字母拉丁词时需自行权衡。
     func apply(to text: String) -> String {
         guard !pairs.isEmpty else { return text }
         var result = text
         for pair in pairs.sorted(by: { $0.wrong.count > $1.wrong.count }) where !pair.wrong.isEmpty {
-            result = result.replacingOccurrences(of: pair.wrong, with: pair.correct)
+            result = result.replacingOccurrences(of: pair.wrong, with: pair.correct, options: .caseInsensitive)
         }
         return result
     }

@@ -247,6 +247,7 @@ struct ControlPanelView: View {
             VStack(alignment: .leading, spacing: 18) {
                 languageSection
                 audioSourceSection
+                translationEngineSection
                 languageAssetsSection
                 startStopSection
                 lowLatencySection
@@ -380,6 +381,53 @@ struct ControlPanelView: View {
             }
             return "排除 \(names.joined(separator: "/"))"
         }
+    }
+
+    // 8.1c 翻译引擎（spec B：Bing 在线 / 设备端优先）
+    private var translationEngineSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("翻译引擎").font(sectionTitleFont).foregroundColor(sectionTitleColor)
+            Menu {
+                ForEach(TranslationEnginePreference.allCases, id: \.rawValue) { preference in
+                    Button(preference.label) {
+                        appState.translationEnginePreference = preference
+                    }
+                }
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "character.book.closed.fill")
+                        .font(.system(size: 14))
+                        .foregroundColor(CPColor.accentLight)
+                    Text(appState.translationEnginePreference.label)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(CPColor.primaryText)
+                    Spacer()
+                    HStack(spacing: 4) {
+                        Text("选择")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(CPColor.secondaryText)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(CPColor.secondaryText)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(CPColor.pickerHandleBg)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(CPColor.pickerBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .overlay(capsuleBorder(corner: 10, color: CPColor.pickerBorder))
+            }
+            .buttonStyle(.plain)
+            Text("设备端在本机翻译、字幕不出本机；不可用时自动回退 Bing（当前生效：\(appState.activeEngineName)）")
+                .font(.system(size: 11))
+                .foregroundColor(CPColor.mutedText)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var languagePicker: some View {

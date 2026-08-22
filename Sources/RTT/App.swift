@@ -443,6 +443,19 @@ final class AppState {
         }
     }
 
+    // MARK: - 翻译引擎（spec B：Bing 在线 / 设备端优先）
+    /// 翻译引擎偏好，持久化到 UserDefaults。默认 Bing 保持既有行为；
+    /// 设备端不可用时 TranslationService 自动回退 Bing。
+    var translationEnginePreference: TranslationEnginePreference = .bing {
+        didSet {
+            UserDefaults.standard.set(translationEnginePreference.rawValue, forKey: "RTT.translationEnginePreference")
+            translationService.setPreference(translationEnginePreference)
+            if isTranslating { restartTranslation() }
+        }
+    }
+    /// 当前生效引擎（设备端回退后即为 Bing），用于界面展示。
+    var activeEngineName: String { translationService.activeEngineName }
+
     // MARK: - 术语表（痛点2：错译查找替换，持久化）
     /// 术语表变化时同步给翻译服务并落盘。
     var glossary: Glossary = Glossary() {
@@ -529,6 +542,9 @@ final class AppState {
         self.audioSourceFilter = Self.loadAudioSourceFilter(from: defaults)
         self.glossary = Self.loadGlossary()
         translationService.setGlossary(glossary)
+        let engineRaw = defaults.string(forKey: "RTT.translationEnginePreference") ?? TranslationEnginePreference.bing.rawValue
+        self.translationEnginePreference = TranslationEnginePreference(rawValue: engineRaw) ?? .bing
+        translationService.setPreference(translationEnginePreference)
         floatingPanel.setRecognitionOnly(isRecognitionOnly)
     }
 
@@ -935,7 +951,9 @@ final class AppState {
             }
 
             do {
-                let result = try await self.translationService.translate(source)
+                // forPreview：partial 预翻译允许复用已锁定译法，但不累计锁定统计，
+                // 避免 partial 抖动污染会话级统计（spec B）。
+                let result = try await self.translationService.translate(source, forPreview: true)
                 guard !Task.isCancelled,
                       generation == self.sessionGeneration,
                       epoch == self.previewEpoch else { return }
