@@ -202,15 +202,6 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
     private let inputBuilderMutex = Mutex<AsyncStream<AnalyzerInput>.Continuation?>(nil)
     private let isRunningMutex = Mutex<Bool>(false)
 
-    /// 读取回调需要的转换状态快照。任一为 nil 即视作已停止，回调直接返回。
-    private func conversionSnapshot() -> (converter: AVAudioConverter, format: AVAudioFormat, builder: AsyncStream<AnalyzerInput>.Continuation)? {
-        let converter = converterMutex.withLock { $0 }
-        let format = analyzerFormatMutex.withLock { $0 }
-        let builder = inputBuilderMutex.withLock { $0 }
-        guard let converter, let format, let builder else { return nil }
-        return (converter, format, builder)
-    }
-
     /// 停止采集的收尾任务，用 Mutex 保护以跨线程安全访问（start/stop 在 MainActor，
     /// 但 stopAndWait 可从异步上下文 await；访问统一走锁）。
     private let stopTaskMutex = Mutex<Task<Void, Never>?>(nil)
@@ -464,6 +455,15 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
         self.inputBuilderMutex.withLock { $0 = inputBuilder }
         resultTask = makeResultTask(for: transcriber, sessionID: sessionID)
 
+        // 显式启动 analyzer 消费 inputSequence（inputSequence: init 只是绑定输入源，
+        // 不会自动开始处理；漏掉这一步音频会流入 AsyncStream 但无人消费）。
+        do {
+            try await analyzer.start(inputSequence: inputSequence)
+        } catch {
+            clearSession(ifMatching: sessionID)
+            throw error
+        }
+
         guard activeSessionID == sessionID else { throw CancellationError() }
 
         let content: SCShareableContent
@@ -711,15 +711,14 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .audio else { return }
         // 先取快照（受锁保护），避免与 start/stop 的写入竞争。
-        // 注意：guard 条件内不能用尾随闭包（无法解析），先取出布尔值再判断；
+        // 注意：guard 条件内不能用尾随闭包（无法解析），先取出值再判断；
         // 只在识别器运行中处理音频，未运行时直接返回。
         let isRunning = isRunningMutex.withLock { $0 }
         guard isRunning else { return }
         guard self.stream === stream else { return }
-        guard let snapshot = conversionSnapshot() else { return }
-        let converter = snapshot.converter
-        let targetFormat = snapshot.format
-        let inputBuilder = snapshot.builder
+        guard sampleBuffer.isValid, sampleBuffer.numSamples > 0 else { return }
+        guard let targetFormat = analyzerFormatMutex.withLock({ $0 }),
+              let inputBuilder = inputBuilderMutex.withLock({ $0 }) else { return }
 
         guard let formatDescription = sampleBuffer.formatDescription,
               let streamDesc = formatDescription.audioStreamBasicDescription,
@@ -728,19 +727,17 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
                   channels: streamDesc.mChannelsPerFrame
               ) else { return }
 
-        if converter.inputFormat != sourceFormat || converter.outputFormat != targetFormat {
-            // 输入格式变化（如设备切换）：重建 converter。
-            let newConverter = AVAudioConverter(from: sourceFormat, to: targetFormat)
-            converterMutex.withLock { $0 = newConverter }
-            guard let newConverter else { return }
-            return convertAndYield(
-                sampleBuffer: sampleBuffer,
-                sourceFormat: sourceFormat,
-                targetFormat: targetFormat,
-                converter: newConverter,
-                inputBuilder: inputBuilder
-            )
+        // converter 惰性创建：首帧音频到达时构造，输入格式变化（设备切换）时重建。
+        // 在锁内原子完成 get-or-create；构造失败时保留旧值等下一帧重试。
+        let converter = converterMutex.withLock { state -> AVAudioConverter? in
+            if let state, state.inputFormat == sourceFormat, state.outputFormat == targetFormat {
+                return state
+            }
+            guard let created = AVAudioConverter(from: sourceFormat, to: targetFormat) else { return state }
+            state = created
+            return created
         }
+        guard let converter else { return }
 
         convertAndYield(
             sampleBuffer: sampleBuffer,
