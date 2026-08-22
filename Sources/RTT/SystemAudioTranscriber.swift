@@ -193,6 +193,8 @@ enum CommunicationApps {
 final class SystemAudioTranscriber: NSObject, SCStreamOutput, AVCaptureAudioDataOutputSampleBufferDelegate, @unchecked Sendable {
     var onTranscript: (@Sendable (TimedTranscriptUpdate) -> Void)?
     var onError: (@Sendable (String) -> Void)?
+    /// #5 VAD：长静音触发强制断句信号（不丢弃音频，仅提示上层提交未完成文本）。
+    var onSilenceBreak: (@Sendable () -> Void)?
 
     // MARK: - 会话
 
@@ -263,6 +265,15 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, AVCaptureAudioData
     private let analyzerFormatMutex = Mutex<AVAudioFormat?>(nil)
     private let inputBuilderMutex = Mutex<AsyncStream<AnalyzerInput>.Continuation?>(nil)
     private let isRunningMutex = Mutex<Bool>(false)
+
+    // MARK: - VAD（#5 语音活动检测）
+    //
+    // 能量 VAD：分块检测语音/静音，长静音触发强制断句信号（onSilenceBreak）。
+    // analyzer 仍收到完整音频——VAD 不丢弃样本，避免破坏 SRT 时间轴（#6 已落地）。
+    // VAD 仅在分析器格式确定后构造（需采样率），用 Mutex 保护跨线程访问。
+    private let vadMutex = Mutex<VoiceActivityDetector?>(nil)
+    /// VAD 开关：真机由 AppState.vadEnabled 透传，关闭时回退旧行为。
+    private let vadEnabledMutex = Mutex<Bool>(true)
 
     /// 停止采集的收尾任务，用 Mutex 保护以跨线程安全访问（start/stop 在 MainActor，
     /// 但 stopAndWait 可从异步上下文 await；访问统一走锁）。
@@ -545,6 +556,12 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, AVCaptureAudioData
         self.analyzer = analyzer
         self.analyzerFormatMutex.withLock { $0 = analyzerFormat }
         self.inputBuilderMutex.withLock { $0 = inputBuilder }
+        // #5 VAD：分析器格式确定后构造（需采样率分块）。会话开启时重置状态。
+        // 闭包参数命名 detector 而非 state，避免与 VADState 状态机值类型混淆。
+        vadMutex.withLock { detector in
+            detector = VoiceActivityDetector(sampleRate: analyzerFormat.sampleRate)
+            detector?.reset()
+        }
         resultTask = makeResultTask(for: transcriber, sessionID: sessionID)
 
         do {
@@ -741,6 +758,8 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, AVCaptureAudioData
             state?.finish()
             state = nil
         }
+        // #5 VAD：停止时清空 VAD 实例与状态。
+        vadMutex.withLock { $0 = nil }
         resultTask?.cancel()
         resultTask = nil
 
@@ -763,6 +782,12 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, AVCaptureAudioData
         stop()
         let task = stopTaskMutex.withLock { $0 }
         await task?.value
+    }
+
+    /// #5 VAD 开关：运行中可热切换。关闭后回退旧行为（仅靠固定防抖断句）。
+    func setVADEnabled(_ enabled: Bool) {
+        vadEnabledMutex.withLock { $0 = enabled }
+        if !enabled { vadMutex.withLock { $0?.reset() } }
     }
 
     private func clearSession(ifMatching sessionID: UUID) {
@@ -1005,11 +1030,25 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, AVCaptureAudioData
 
                 if error == nil, converted.frameLength > 0 {
                     inputBuilder.yield(AnalyzerInput(buffer: converted))
+                    // #5 VAD：转换后的 PCM 同步喂 VAD，仅取 .silenceBreak 信号
+                    // 上抛（不丢弃样本，analyzer 已收到完整音频）。空场景或未启用时跳过。
+                    feedVAD(converted)
                 }
             }
         } catch {
             // 跳过损坏的音频缓冲；静默丢帧过多时通过日志暴露。
             Self.segmentLogger.debug("音频缓冲转换失败: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+    /// #5 VAD：把转换后的 PCM 喂 VAD，仅对 .silenceBreak 信号回调上抛。
+    /// VAD 只观测不拦截——音频已 yield 给 analyzer，这里不丢弃、不阻塞。
+    /// 非 VAD 格式（非 Float32）feed 内部降级为空，安全跳过。
+    private func feedVAD(_ buffer: AVAudioPCMBuffer) {
+        guard vadEnabledMutex.withLock({ $0 }) else { return }
+        guard let vad = vadMutex.withLock({ $0 }) else { return }
+        let events = vad.feed(buffer)
+        for event in events where event == .silenceBreak {
+            onSilenceBreak?()
         }
     }
 }

@@ -482,6 +482,15 @@ final class AppState {
         }
     }
 
+    // MARK: - VAD（#5 语音活动检测）
+    /// VAD 开关：默认开；关闭后回退旧行为（仅固定 1.5s 防抖断句）。
+    var vadEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(vadEnabled, forKey: "RTT.vadEnabled")
+            transcriber.setVADEnabled(vadEnabled)
+        }
+    }
+
     // MARK: - 音频来源过滤（痛点1：排除通知音）
     /// 音频来源过滤策略，持久化到 UserDefaults。
     var audioSourceFilter: AudioSourceFilter = .allSystem {
@@ -568,6 +577,8 @@ final class AppState {
     private var previewTask: Task<Void, Never>?
     private var pendingPreviewText = ""
     private var previewEpoch = 0
+    /// #5 VAD：最近一次识别更新，供 silenceBreak 强制断句复用其 finalizedText/audioRange。
+    private var lastTranscriptUpdate: TimedTranscriptUpdate?
     /// 预览去重与冷却
     private var lastPreviewSource = ""
     private var lastPreviewStart: UInt64?
@@ -597,6 +608,7 @@ final class AppState {
         self.subtitleWindowLocked = defaults.bool(forKey: "RTT.subtitleWindowLocked")
         let styleRaw = defaults.string(forKey: "RTT.subtitleStylePreset") ?? SubtitleStylePreset.standard.rawValue
         self.subtitleStylePreset = SubtitleStylePreset(rawValue: styleRaw) ?? .standard
+        self.vadEnabled = (defaults.object(forKey: "RTT.vadEnabled") as? Bool) ?? true
         let modeRaw = defaults.string(forKey: "RTT.processingMode") ?? ProcessingMode.translation.rawValue
         self.processingMode = ProcessingMode(rawValue: modeRaw) ?? .translation
         self.audioSourceFilter = Self.loadAudioSourceFilter(from: defaults)
@@ -684,6 +696,7 @@ final class AppState {
             isTranslating = true
             isTranslationReady = false
             textTracker.reset()
+            lastTranscriptUpdate = nil
             stopTranslationWorkers()
             startTranslationWorkers()
             resetPreviewState()
@@ -723,6 +736,15 @@ final class AppState {
 
             // 4. 启动系统音频捕获 + 单语言实时识别
             let sessionOffset = elapsedTimelineTime()
+            // #5 VAD：长静音触发强制断句。不依赖语言、不增加可见延迟：
+            // silenceBreak 来临时若仍有未提交文本，复用最近一次识别更新
+            // 以 force=true 提交（与 1.5s 防抖同一路径），空文本则跳过。
+            transcriber.onSilenceBreak = { [weak self] in
+                guard let self else { return }
+                Task { @MainActor in
+                    self.onSilenceBreak(sessionOffset: sessionOffset, language: language, generation: generation)
+                }
+            }
             transcriber.onTranscript = { [weak self] update in
                 guard let self else { return }
                 Task { @MainActor in
@@ -794,6 +816,8 @@ final class AppState {
         generation: Int
     ) {
         guard generation == sessionGeneration else { return }
+        // #5 VAD：保留最近一次识别更新，供 silenceBreak 强制断句复用。
+        lastTranscriptUpdate = update
 
         // 有完整句号时立即按句提交；未完成部分继续显示并等待停顿。
         commitAvailableText(
@@ -805,6 +829,41 @@ final class AppState {
         )
         scheduleCommit(
             update,
+            sessionOffset: sessionOffset,
+            language: language,
+            generation: generation
+        )
+    }
+
+    /// #5 VAD 长静音强制断句：复用最近一次识别更新提交未完成文本。
+    /// 与 1.5s 防抖同一提交路径，避免逻辑分叉。无未完成文本（live 文本空）时跳过，
+    /// 不产空条目。
+    ///
+    /// 标点检查：先走 force=false（completeSentences）提交含句号的完整句，
+    /// 避免把含句号的剩余当作无标点尾巴一次性合并提交、跨句号捆成一条；
+    /// 仍剩无标点尾巴时再 force=true 强制提交——这才是 VAD 在防抖盲区提前断句的价值。
+    /// force=true 对空余量是安全 no-op（sentences=[]、consumed=0）。
+    private func onSilenceBreak(sessionOffset: TimeInterval, language: String, generation: Int) {
+        guard generation == sessionGeneration else { return }
+        guard let update = lastTranscriptUpdate else { return }
+        // liveText 为空意味着没有未提交文本，跳过避免空条目。
+        let live = floatingPanel.liveText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !live.isEmpty else { return }
+        // 取消待执行的 1.5s 防抖，由 VAD 提前断句接管。
+        debounceTask?.cancel()
+        debounceTask = nil
+        // 1) 先提交含句号的完整句（走 completeSentences，尊重标点断句）。
+        commitAvailableText(
+            update,
+            force: false,
+            sessionOffset: sessionOffset,
+            language: language,
+            generation: generation
+        )
+        // 2) 仍剩无标点尾巴时强制提交（VAD 价值：防抖盲区提前断句）。
+        commitAvailableText(
+            update,
+            force: true,
             sessionOffset: sessionOffset,
             language: language,
             generation: generation
@@ -1250,6 +1309,7 @@ final class AppState {
         transcriber.stop()
         debounceTask?.cancel()
         debounceTask = nil
+        lastTranscriptUpdate = nil
         stopTranslationWorkers()
         resetPreviewState()
         isTranslating = false

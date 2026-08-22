@@ -260,6 +260,15 @@ struct SettingsView: View {
                 Toggle("句子完成前显示临时翻译预览", isOn: lowLatencyBinding)
                 Toggle("锁定字幕窗口（防误拖动）", isOn: lockBinding)
             }
+
+            // #5 VAD：长静音强制断句开关。关闭后回退旧行为（仅 1.5s 防抖）。
+            settingCard(title: "语音活动检测") {
+                Toggle("长静音自动断句（VAD）", isOn: vadBinding)
+                Text("检测到较长静音时自动断句，避免一条字幕跨话题。异常时可关闭回到固定防抖。"
+                     + "当前为能量法，对环境音/片头音乐区分有限，后续可升级。")
+                    .font(.system(size: 11))
+                    .foregroundColor(CPColor.secondaryText)
+            }
         }
     }
 
@@ -397,6 +406,14 @@ struct SettingsView: View {
         Binding(
             get: { appState.subtitleWindowLocked },
             set: { appState.subtitleWindowLocked = $0 }
+        )
+    }
+
+    /// #5 VAD 开关绑定，直连 AppState.vadEnabled（持久化与设置同源）。
+    private var vadBinding: Binding<Bool> {
+        Binding(
+            get: { appState.vadEnabled },
+            set: { appState.vadEnabled = $0 }
         )
     }
 }
