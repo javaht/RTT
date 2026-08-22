@@ -18,6 +18,7 @@ RTT 是一款面向 Mac 视频观看场景的实时双语字幕工具，适合 Y
 - 翻译失败可单句重试
 - 显示语言模型下载进度，下载完成后自动开始识别
 - 管理 RTT 自己保留的 Apple 语音模型
+- 语言包管理：支持下拉式删除已用语言包（点选释放）
 
 ## 支持的识别语言
 
@@ -110,6 +111,7 @@ Sources/RTT/
   TranslationService.swift     翻译服务入口
   OnlineTranslationService.swift
   TranscriptExporter.swift     SRT/TXT/Markdown 导出
+  ControlPanelView.swift       控制面板（下拉式语言包管理）
 Packaging/Info.plist            App Bundle 信息和权限说明
 scripts/build-app.sh            Release App 打包与签名
 Tests/RTTTests/                 字幕导出测试
@@ -120,3 +122,4 @@ Tests/RTTTests/                 字幕导出测试
 项目内置 [Translate Shell](https://github.com/soimort/translate-shell) 和 GNU Awk 5.4.1，用于调用 Bing 翻译。GNU Awk 按 GPLv3 或更高版本授权；完整许可证、二进制来源、对应源码下载地址及校验值见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 本仓库目前没有为 RTT 自有代码授予开源许可证；上述第三方许可证仅适用于各自组件。
+
