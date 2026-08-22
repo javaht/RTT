@@ -711,7 +711,10 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .audio else { return }
         // 先取快照（受锁保护），避免与 start/stop 的写入竞争。
-        guard !(isRunningMutex.withLock { $0 }) else { return }
+        // 注意：guard 条件内不能用尾随闭包（无法解析），先取出布尔值再判断；
+        // 只在识别器运行中处理音频，未运行时直接返回。
+        let isRunning = isRunningMutex.withLock { $0 }
+        guard isRunning else { return }
         guard self.stream === stream else { return }
         guard let snapshot = conversionSnapshot() else { return }
         let converter = snapshot.converter
