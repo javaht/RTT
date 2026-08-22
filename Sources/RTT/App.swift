@@ -1096,27 +1096,14 @@ final class AppState {
     }
 
     /// 复制最近 N 条正式字幕，带时间轴。
-    func copyRecentSubtitles(count: Int) {
-        let entries = Array(floatingPanel.entries.suffix(count))
-        guard !entries.isEmpty else { return }
-        let text = entries.map(copyTextWithTimestamp(for:)).joined(separator: "\n\n")
-        copyToPasteboard(text)
-    }
+    /// #6：随“复制最近 5 条”入口迁出控制面板，多条复制由转写浏览器的
+    /// “复制全部”（按显示模式拼带时间轴文本）承担，此函数移除。
 
     private func copyText(for entry: TranslationEntry) -> String {
         let source = entry.cleanedSource
         let target = entry.cleanedTarget
         guard !target.isEmpty, target != source else { return source }
         return "\(source)\n\(target)"
-    }
-
-    private func copyTextWithTimestamp(for entry: TranslationEntry) -> String {
-        let stamp = formatTimestamp(max(0, entry.startTime))
-        return "[\(stamp)]\n\(copyText(for: entry))"
-    }
-
-    private func formatTimestamp(_ interval: TimeInterval) -> String {
-        TranscriptExporter.displayTimestamp(interval)
     }
 
     private func copyToPasteboard(_ text: String) {

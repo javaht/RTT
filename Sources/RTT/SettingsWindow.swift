@@ -43,7 +43,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 struct SettingsView: View {
     @MainActor
     enum Page: String, CaseIterable {
-        case general, audio, translation, appearance
+        case general, audio, translation, appearance, packs
 
         var title: String {
             switch self {
@@ -51,6 +51,7 @@ struct SettingsView: View {
             case .audio: AppString.settingsAudio.text()
             case .translation: AppString.settingsTranslation.text()
             case .appearance: AppString.settingsAppearance.text()
+            case .packs: "语言包"
             }
         }
 
@@ -60,6 +61,7 @@ struct SettingsView: View {
             case .audio: "waveform"
             case .translation: "character.book.closed"
             case .appearance: "paintbrush"
+            case .packs: "shippingbox"
             }
         }
     }
@@ -112,6 +114,7 @@ struct SettingsView: View {
         case .audio: audioPage
         case .translation: translationPage
         case .appearance: appearancePage
+        case .packs: packsPage
         }
     }
 
@@ -256,6 +259,69 @@ struct SettingsView: View {
                 Toggle("锁定字幕窗口（防误拖动）", isOn: lockBinding)
             }
         }
+    }
+
+    // MARK: - 语言包：从控制面板侧栏迁入（#7）
+
+    private var packsPage: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            settingCard(title: "语言包管理") {
+                HStack {
+                    if appState.isLoadingLanguageAssets {
+                        ProgressView().controlSize(.small)
+                    } else if appState.languageAssets.isEmpty {
+                        Text("暂无 RTT 管理的语言包")
+                            .font(.system(size: 12))
+                            .foregroundColor(CPColor.mutedText)
+                    } else {
+                        // 每个语言包一行：当前识别语言置灰不可释放，其余点击即弹确认释放
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(appState.languageAssets) { asset in
+                                languagePackRow(asset)
+                            }
+                            Text("点击释放以解除 RTT 占用；当前识别语言不可释放。macOS 共享资源释放后仍可能被系统保留。")
+                                .font(.system(size: 11))
+                                .foregroundColor(CPColor.mutedText)
+                        }
+                    }
+                    Spacer()
+                    Button {
+                        appState.refreshLanguageAssets()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .foregroundColor(CPColor.secondaryText)
+                    }
+                    .buttonStyle(.plain)
+                    .help("刷新语言包")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func languagePackRow(_ asset: LanguageAssetState) -> some View {
+        let isCurrent = appState.selectedLanguage == asset.id
+        HStack {
+            Text(asset.label)
+                .font(.system(size: 13, weight: isCurrent ? .semibold : .regular))
+                .foregroundColor(isCurrent ? CPColor.primaryText : CPColor.secondaryText)
+            if isCurrent {
+                Text("使用中")
+                    .font(.system(size: 10))
+                    .foregroundColor(CPColor.mutedText)
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(CPColor.fieldBackground)
+                    .clipShape(Capsule())
+            }
+            Spacer()
+            Button("释放") {
+                if !isCurrent { appState.confirmReleaseLanguage(asset) }
+            }
+            .disabled(isCurrent)
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        .padding(.vertical, 4)
     }
 
     // MARK: - 组件与绑定（全部直连 AppState 现有属性，故事 7 双向同步）

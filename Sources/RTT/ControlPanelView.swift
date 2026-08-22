@@ -251,7 +251,6 @@ struct ControlPanelView: View {
                 languageSection
                 audioSourceSection
                 translationEngineSection
-                languageAssetsSection
                 startStopSection
                 lowLatencySection
                 glossarySection
@@ -489,88 +488,7 @@ struct ControlPanelView: View {
         .buttonStyle(.plain)
     }
 
-    private var languageAssetsSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("语言包管理").font(sectionTitleFont).foregroundColor(sectionTitleColor)
-                Spacer()
-                Button {
-                    appState.refreshLanguageAssets()
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .foregroundColor(CPColor.secondaryText)
-                }
-                .buttonStyle(.plain)
-                .help("刷新语言包")
-            }
-
-            if appState.isLoadingLanguageAssets {
-                ProgressView()
-                    .controlSize(.small)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            } else if appState.languageAssets.isEmpty {
-                Text("暂无 RTT 管理的语言包")
-                    .font(.system(size: 12))
-                    .foregroundColor(CPColor.mutedText)
-            } else {
-                languageAssetsPicker
-                Text("选择语言包以解除 RTT 占用；当前识别语言不可释放")
-                    .font(.system(size: 11))
-                    .foregroundColor(CPColor.mutedText)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    // 语言包下拉框：每个语言包一行，点击非当前语言即弹确认释放，当前语言置灰。
-    private var languageAssetsPicker: some View {
-        Menu {
-            ForEach(appState.languageAssets) { asset in
-                let isCurrent = appState.selectedLanguage == asset.id
-                Button {
-                    if !isCurrent {
-                        appState.confirmReleaseLanguage(asset)
-                    }
-                } label: {
-                    if isCurrent {
-                        Text("🗑 \(asset.label) · 使用中")
-                    } else {
-                        Text("🗑 \(asset.label)")
-                    }
-                }
-                .disabled(isCurrent)
-            }
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: "shippingbox.fill")
-                    .font(.system(size: 14))
-                    .foregroundColor(CPColor.accentLight)
-                Text("已安装 \(appState.languageAssets.count) 个")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(CPColor.primaryText)
-                Spacer()
-                HStack(spacing: 4) {
-                    Text("管理")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(CPColor.secondaryText)
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundColor(CPColor.secondaryText)
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(CPColor.pickerHandleBg)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(CPColor.pickerBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-            .overlay(capsuleBorder(corner: 10, color: CPColor.pickerBorder))
-        }
-        .buttonStyle(.plain)
-    }
+    // 语言包管理已迁入设置窗口（#7），控制面板不再保留此分区。
 
     // 8.2 开始 / 停止
     private var startStopSection: some View {
@@ -746,16 +664,12 @@ struct ControlPanelView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    // 8.6 导出
+    // 8.6 转写记录入口（#6：导出已迁浏览器，此处保留跳转入口直至 #8 重构为动作轨）
     private var exportSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("导出").font(sectionTitleFont).foregroundColor(sectionTitleColor)
+            Text("记录").font(sectionTitleFont).foregroundColor(sectionTitleColor)
             VStack(spacing: 8) {
-                exportButton(title: "SRT") { appState.exportTranscript(format: .srt) }
-                exportButton(title: "TXT") { appState.exportTranscript(format: .txt) }
-                exportButton(title: "Markdown") { appState.exportTranscript(format: .markdown) }
-                // spec C（故事14）：打开会话内转写浏览器（含 AI 摘要）
-                exportButton(title: "转写记录与摘要") { appState.onRequestShowBrowser?() }
+                exportButton(title: "转写记录 · 摘要 · 导出") { appState.onRequestShowBrowser?() }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -777,13 +691,12 @@ struct ControlPanelView: View {
         .buttonStyle(.plain)
     }
 
-    // 8.7 复制
+    // 8.7 复制（#6：复制最近 5 条已迁浏览器"复制全部"，此处保留当前字幕快捷复制）
     private var copySection: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("复制").font(sectionTitleFont).foregroundColor(sectionTitleColor)
             VStack(spacing: 8) {
                 exportButton(title: "复制当前字幕") { appState.copyCurrentSubtitle() }
-                exportButton(title: "复制最近 5 条") { appState.copyRecentSubtitles(count: 5) }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

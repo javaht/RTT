@@ -145,6 +145,18 @@ struct TranscriptBrowserView: View {
                 copyToPasteboard(allRowsText(rows))
             }
             .disabled(rows.isEmpty)
+            // #6 导出归位记录中心：SRT/TXT/MD 从此发起（MD 含摘要复选由保存面板处理）
+            Menu {
+                Button("双语 SRT（含时间轴）") { appState.exportTranscript(format: .srt) }
+                Button("纯文本 TXT") { appState.exportTranscript(format: .txt) }
+                Button("Markdown") { appState.exportTranscript(format: .markdown) }
+            } label: {
+                Label("导出", systemImage: "square.and.arrow.up")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .disabled(rows.isEmpty)
+            .opacity(rows.isEmpty ? 0.4 : 1.0)
             Spacer()
             if isFollowingLatest {
                 Label("跟随最新", systemImage: "arrow.down.to.line")

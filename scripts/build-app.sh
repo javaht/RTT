@@ -15,11 +15,22 @@ if [[ -d "$RTT_APP_DIR" ]]; then
     rm -r "$RTT_APP_DIR"
 fi
 
-mkdir -p "$RTT_CONTENTS_DIR/MacOS" "$RTT_CONTENTS_DIR/Resources"
+mkdir -p "$RTT_CONTENTS_DIR/MacOS" "$RTT_CONTENTS_DIR/Resources" "$RTT_CONTENTS_DIR/Frameworks"
 cp "$RTT_BIN_DIR/RTT" "$RTT_CONTENTS_DIR/MacOS/RTT"
 cp "$RTT_PROJECT_DIR/Packaging/Info.plist" "$RTT_CONTENTS_DIR/Info.plist"
 cp -R "$RTT_BIN_DIR/RTT_RTT.bundle/Resources/." "$RTT_CONTENTS_DIR/Resources/"
 "$RTT_PROJECT_DIR/scripts/install-app-icon.sh" "$RTT_CONTENTS_DIR"
+
+# spec D 自动更新：Sparkle framework（SPM artifact，通用二进制）拷入 bundle 并挂 rpath。
+# 与 build-arch-app.sh 保持同一逻辑；缺失时警告但不阻断（更新功能运行时降级）。
+# framework 签名由脚本末尾对整个 bundle 的 codesign --deep 覆盖，无需单独签。
+RTT_SPARKLE_FW="$RTT_PROJECT_DIR/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+if [[ -d "$RTT_SPARKLE_FW" ]]; then
+    cp -R "$RTT_SPARKLE_FW" "$RTT_CONTENTS_DIR/Frameworks/"
+    install_name_tool -add_rpath '@loader_path/../Frameworks' "$RTT_CONTENTS_DIR/MacOS/RTT"
+else
+    echo "warning: Sparkle.framework not found in SPM artifacts; update features will degrade at runtime" >&2
+fi
 chmod +x "$RTT_CONTENTS_DIR/MacOS/RTT" "$RTT_CONTENTS_DIR/Resources/trans" "$RTT_CONTENTS_DIR/Resources/gawk"
 
 RTT_SIGNING_IDENTITY=${SIGNING_IDENTITY:-}
