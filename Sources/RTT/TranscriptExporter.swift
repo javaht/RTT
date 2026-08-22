@@ -27,14 +27,14 @@ enum TranscriptExportFormat {
 }
 
 enum TranscriptExporter {
-    static func export(entries: [TranslationEntry], format: TranscriptExportFormat) -> String {
+    static func export(entries: [TranslationEntry], format: TranscriptExportFormat, summary: String? = nil) -> String {
         switch format {
         case .srt:
             srt(entries: entries)
         case .txt:
             txt(entries: entries)
         case .markdown:
-            markdown(entries: entries)
+            markdown(entries: entries, summary: summary)
         }
     }
 
@@ -73,7 +73,7 @@ enum TranscriptExporter {
         entries.map(exportedText(for:)).joined(separator: "\n\n")
     }
 
-    static func markdown(entries: [TranslationEntry], date: Date = Date()) -> String {
+    static func markdown(entries: [TranslationEntry], summary: String? = nil, date: Date = Date()) -> String {
         var lines: [String] = []
         lines.append("# RTT 双语字幕记录")
         lines.append("")
@@ -82,6 +82,14 @@ enum TranscriptExporter {
         dateFormatter.dateFormat = "yyyy-MM-dd HH:mm"
         lines.append("导出时间：\(dateFormatter.string(from: Date()))")
         lines.append("")
+
+        // 摘要段落（spec C 故事 15）：置顶便于先看要点再定位细节
+        if let summary, !summary.isEmpty {
+            lines.append("## 会话摘要")
+            lines.append("")
+            lines.append(summary)
+            lines.append("")
+        }
 
         for entry in entries {
             let source = entry.cleanedSource

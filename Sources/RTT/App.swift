@@ -11,7 +11,8 @@ struct RTTApp: App {
         // 菜单栏保留为入口，AppDelegate 启动时自动显示面板窗口
         MenuBarExtra {
             MenuBarExtraContent(
-                showControlPanel: appDelegate.showControlPanel
+                showControlPanel: appDelegate.showControlPanel,
+                showBrowser: appDelegate.showBrowser
             )
         } label: {
             Image(systemName: "captions.bubble")
@@ -23,10 +24,16 @@ struct RTTApp: App {
 @MainActor
 struct MenuBarExtraContent: View {
     let showControlPanel: () -> NSWindow
+    /// 打开转写浏览器（spec C 故事 14：控制面板与菜单双入口）。
+    let showBrowser: () -> Void
 
     var body: some View {
         Button("显示 RTT 主窗口") {
             _ = showControlPanel()
+        }
+
+        Button("转写记录与摘要") {
+            showBrowser()
         }
 
         Divider()
@@ -43,6 +50,7 @@ struct MenuBarExtraContent: View {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let appState = AppState()
     let controlPanelWindowController = ControlPanelWindowController()
+    let browserWindowController = TranscriptBrowserWindowController()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.regular)
@@ -52,6 +60,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         appState.onRequestShowControlPanel = { [weak self] in
             _ = self?.showControlPanel()
+        }
+        appState.onRequestShowBrowser = { [weak self] in
+            guard let self else { return }
+            _ = self.browserWindowController.show(appState: self.appState)
         }
         appState.refreshLanguageAssets()
 
@@ -69,6 +81,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func showControlPanel() -> NSWindow {
         appState.leaveFloatingTranslationMode()
         return controlPanelWindowController.show(appState: appState)
+    }
+
+    /// 打开转写浏览器（spec C）：供菜单栏与 AppState 回调共用。
+    func showBrowser() {
+        _ = browserWindowController.show(appState: appState)
     }
 
     func applicationShouldHandleReopen(
@@ -499,6 +516,14 @@ final class AppState {
     let floatingPanel = FloatingPanelManager()
     let transcriber = SystemAudioTranscriber()
     let translationService = TranslationService()
+    /// 摘要控制器（spec C）：原文/译文摘要独立缓存、可取消。
+    let summaryController = SummaryController()
+    /// 浏览器/摘要/Markdown 导出共用的完整已提交条目（归档+内存合并，同源）。
+    var committedEntries: [TranslationEntry] {
+        TranscriptBrowser.mergedEntries(memory: floatingPanel.entries, archived: archive.loadAll())
+    }
+    /// 打开转写浏览器窗口（AppDelegate 注入，spec C 故事 14）。
+    var onRequestShowBrowser: (() -> Void)?
 
     /// 已提交的 finalized 文本前缀（用于识别修正检测与增量提交）
     private var textTracker = CommittedTextTracker()
@@ -1379,30 +1404,11 @@ final class AppState {
     }
 
     func exportTranscript(format: TranscriptExportFormat) {
-        // 痛点4：合并归档 + 内存幸存窗口，还原被裁剪的旧条目。
-        // 归档按 orderID 顺序写入；内存窗口是归档的后缀。合并时去重：
-        // 先取归档中 orderID < 内存最旧条目 orderID 的部分（即被裁剪的），
-        // 再拼接内存全部条目，保持时间顺序。
+        // 痛点4：合并归档 + 内存幸存窗口，还原被裁剪的旧条目
+        // （合并规则收口到 TranscriptBrowser.mergedEntries，与浏览器/摘要同源）。
         let memoryEntries = floatingPanel.entries
         guard !memoryEntries.isEmpty else { return }
-
-        let archived = archive.loadAll()
-        let merged: [TranslationEntry]
-        if let firstMemoryID = memoryEntries.first?.orderID, !archived.isEmpty {
-            // 内存最旧条目的 orderID；归档中 orderID < 它的为被裁剪的旧条目。
-            let trimmed = archived.filter { $0.orderID < firstMemoryID }
-            let archivedAsEntries = trimmed.map { TranslationEntry(
-                orderID: $0.orderID,
-                source: $0.source,
-                target: $0.target,
-                startTime: $0.startTime,
-                endTime: $0.endTime,
-                userCorrected: $0.userCorrected
-            )}
-            merged = archivedAsEntries + memoryEntries
-        } else {
-            merged = memoryEntries
-        }
+        let merged = TranscriptBrowser.mergedEntries(memory: memoryEntries, archived: archive.loadAll())
 
         let panel = NSSavePanel()
         switch format {
@@ -1417,7 +1423,14 @@ final class AppState {
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
         do {
-            let content = TranscriptExporter.export(entries: merged, format: format)
+            // Markdown 且已有摘要时附加摘要段落（spec C 故事 15）：
+            // 优先译文摘要，只有原文摘要时回退原文——只生成了原文摘要的用户
+            // 也能把摘要带出去。
+            let summary: String? = format == .markdown
+                ? (summaryController.cachedSummary(for: .translated)
+                    ?? summaryController.cachedSummary(for: .original))
+                : nil
+            let content = TranscriptExporter.export(entries: merged, format: format, summary: summary)
             try content.write(to: url, atomically: true, encoding: .utf8)
         } catch {
             showError("导出失败：\(error.localizedDescription)")

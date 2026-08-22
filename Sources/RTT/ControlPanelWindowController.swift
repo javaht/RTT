@@ -26,12 +26,7 @@ final class ControlPanelWindowController {
         window.title = "RTT 视频控制面板"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
-        window.backgroundColor = NSColor(
-            calibratedRed: 0x10 / 255,
-            green: 0x18 / 255,
-            blue: 0x27 / 255,
-            alpha: 1
-        )
+        window.backgroundColor = NSColor(CPColor.windowBackground)
         window.isOpaque = true
         window.minSize = NSSize(width: 900, height: 560)
         window.contentView = hostingView

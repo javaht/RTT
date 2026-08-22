@@ -12,7 +12,8 @@ private extension Color {
     }
 }
 
-private enum CPColor {
+/// 控制面板与转写浏览器共用的深色配色（spec C 起浏览器窗口复用）。
+enum CPColor {
     // 采用专业 macOS Pro 级暗黑设计系统（沉稳、克制、大气）：
     // 深炭灰/石墨层级，搭配 Apple 系统级专业蓝，去除刺眼高饱和霓虹色
 
@@ -33,6 +34,8 @@ private enum CPColor {
     static let border = Color(hex: 0x333A48)
     static let fieldBorder = Color(hex: 0x3D4657)
     static let divider = Color(hex: 0x272C38)
+    /// 浏览器窗口背景色（与控制面板控制器硬编码值同款，集中定义避免分叉）。
+    static let windowBackground = Color(hex: 0x101827)
 
     // 下拉框与交互控件：清晰的卡片衬底 + 柔和清晰的高亮边框
     static let pickerBackground = Color(hex: 0x282D3B)
@@ -756,6 +759,8 @@ struct ControlPanelView: View {
                 exportButton(title: "SRT") { appState.exportTranscript(format: .srt) }
                 exportButton(title: "TXT") { appState.exportTranscript(format: .txt) }
                 exportButton(title: "Markdown") { appState.exportTranscript(format: .markdown) }
+                // spec C（故事14）：打开会话内转写浏览器（含 AI 摘要）
+                exportButton(title: "转写记录与摘要") { appState.onRequestShowBrowser?() }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
