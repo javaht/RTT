@@ -4,7 +4,6 @@ import os
 import ScreenCaptureKit
 import Speech
 import Synchronization
-
 struct TimedTranscriptUpdate: Sendable {
     let text: String
     let finalizedText: String
@@ -112,6 +111,8 @@ final class SegmentTable: @unchecked Sendable {
 /// 音频来源过滤策略。
 /// 痛点1：捕获整个显示器音频时，微信/Slack 通知音混入字幕导致断句错乱。
 /// 允许用户选择只听某 app 或排除通讯类 app。
+/// spec A：新增麦克风维度——按设备采集（会议/口语练习/外接麦克风场景），
+/// 不走 ScreenCaptureKit，走 AVCaptureSession。
 enum AudioSourceFilter: Sendable, Equatable {
     /// 捕获全部系统音频（仅排除 RTT 自身），旧行为。
     case allSystem
@@ -119,14 +120,51 @@ enum AudioSourceFilter: Sendable, Equatable {
     case only(bundleID: String)
     /// 捕获除指定 app 外的所有系统音频。
     case excluding(bundleIDs: [String])
+    /// 采集指定麦克风设备（AVCaptureDevice uniqueID）。
+    /// name 仅用于菜单展示，持久化时丢弃，加载后由设备目录重新解析。
+    case microphone(deviceID: String, name: String)
 
     var persistenceKey: String {
         switch self {
         case .allSystem: "allSystem"
         case let .only(bundleID): "only:" + bundleID
         case let .excluding(bundleIDs): "excluding:" + bundleIDs.joined(separator: ",")
+        case let .microphone(deviceID, _): "mic:" + deviceID
         }
     }
+
+    /// 从持久化键解码。无法识别（含空设备 ID）回退 allSystem，
+    /// 与 AppState.loadAudioSourceFilter 的既有宽容语义一致；
+    /// 设备真正缺失的报错发生在采集启动时（microphoneDeviceUnavailable），
+    /// 不在解码时静默处理。
+    init(persistenceKey: String) {
+        if persistenceKey == "allSystem" { self = .allSystem; return }
+        if persistenceKey.hasPrefix("only:") {
+            let bundleID = String(persistenceKey.dropFirst("only:".count))
+            self = bundleID.isEmpty ? .allSystem : .only(bundleID: bundleID)
+            return
+        }
+        if persistenceKey.hasPrefix("excluding:") {
+            let raw = String(persistenceKey.dropFirst("excluding:".count))
+            let bundleIDs = raw.split(separator: ",").map(String.init)
+            self = bundleIDs.isEmpty ? .allSystem : .excluding(bundleIDs: bundleIDs)
+            return
+        }
+        if persistenceKey.hasPrefix("mic:") {
+            let deviceID = String(persistenceKey.dropFirst("mic:".count))
+            self = deviceID.isEmpty ? .allSystem : .microphone(deviceID: deviceID, name: "")
+            return
+        }
+        self = .allSystem
+    }
+}
+
+/// 麦克风目录项（值类型，菜单展示与排序用）。
+/// 从 AVCaptureDevice 提取，避免 UI 层直接依赖 AVFoundation 设备对象。
+struct MicrophoneDevice: Sendable, Equatable, Identifiable {
+    let id: String
+    let name: String
+    let isBuiltIn: Bool
 }
 
 /// 捕获系统音频，并使用 macOS 26 的 SpeechAnalyzer 实时识别。
@@ -137,7 +175,7 @@ enum AudioSourceFilter: Sendable, Equatable {
 ///
 /// 类本身标记 `@unchecked Sendable`：受 Mutex 保护的状态访问在并发上下文下安全，
 /// 供 AppState（@MainActor）将其发送到非隔离的 start/stopAndWait 方法。
-final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendable {
+final class SystemAudioTranscriber: NSObject, SCStreamOutput, AVCaptureAudioDataOutputSampleBufferDelegate, @unchecked Sendable {
     var onTranscript: (@Sendable (TimedTranscriptUpdate) -> Void)?
     var onError: (@Sendable (String) -> Void)?
 
@@ -200,6 +238,11 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
     // stream 回调内只取快照，不在持锁状态下做长耗时操作。
 
     private var stream: SCStream?
+    /// 麦克风采集会话（spec A）：与 SCStream 互斥，同一时刻只有一条采集路径。
+    private var captureSession: AVCaptureSession?
+    /// 麦克风采集运行期错误观察（设备拔出/会话中断 → onError，spec A 故事6）。
+    /// 用 Mutex 保护：注册在采集线程的回调里，移除在 stop。
+    private let runtimeErrorObserverMutex = Mutex<Any?>(nil)
     /// 音频回调用到的转换状态快照：回调读取，start/stop 写入。
     private let converterMutex = Mutex<AVAudioConverter?>(nil)
     private let analyzerFormatMutex = Mutex<AVAudioFormat?>(nil)
@@ -210,9 +253,42 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
     /// 但 stopAndWait 可从异步上下文 await；访问统一走锁）。
     private let stopTaskMutex = Mutex<Task<Void, Never>?>(nil)
 
+    // MARK: - 麦克风目录（spec A）
+
+    /// 枚举当前可用麦克风（内建 + 外接），按菜单顺序返回。
+    /// UI 打开来源菜单时调用；无麦克风时返回空数组。
+    @MainActor
+    static func availableMicrophones() -> [MicrophoneDevice] {
+        let discovery = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.microphone, .external],
+            mediaType: .audio,
+            position: .unspecified
+        )
+        let devices = discovery.devices.map { device in
+            MicrophoneDevice(
+                id: device.uniqueID,
+                name: device.localizedName,
+                isBuiltIn: device.deviceType != .external
+            )
+        }
+        return sortedMicrophoneMenuItems(devices)
+    }
+
+    /// 菜单排序：内建优先、外接其次，组内按名称本地化排序。
+    /// 纯函数，供目录与测试共用。
+    static func sortedMicrophoneMenuItems(_ devices: [MicrophoneDevice]) -> [MicrophoneDevice] {
+        devices.sorted { lhs, rhs in
+            if lhs.isBuiltIn != rhs.isBuiltIn {
+                return lhs.isBuiltIn
+            }
+            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+        }
+    }
+
     /// 支持的识别语言列表
     static let supportedLanguages: [(id: String, label: String)] = [
         ("zh-CN", "🇨🇳 中文（简体）"),
+        ("yue", "🇭🇰 粤语"),
         ("en-US", "🇺🇸 英语（美国）"),
         ("en-GB", "🇬🇧 英语（英国）"),
         ("ru-RU", "🇷🇺 俄语"),
@@ -467,6 +543,25 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
 
         guard activeSessionID == sessionID else { throw CancellationError() }
 
+        // spec A：麦克风路径与系统音频路径分流。麦克风走 AVCaptureSession，
+        // 不需要屏幕录制权限，但需要麦克风权限；系统音频仍走 ScreenCaptureKit。
+        switch audioSource {
+        case let .microphone(deviceID, name):
+            try await startMicrophoneCapture(
+                deviceID: deviceID, deviceName: name, sessionID: sessionID
+            )
+        default:
+            try await startSystemAudioCapture(
+                audioSource: audioSource, sessionID: sessionID
+            )
+        }
+    }
+
+    /// 系统音频采集路径（ScreenCaptureKit）：全系统 / 仅某 app / 排除某 app。
+    /// 痛点1 原有逻辑，spec A 仅将其从 start 抽出以便与麦克风路径分流。
+    private func startSystemAudioCapture(
+        audioSource: AudioSourceFilter, sessionID: UUID
+    ) async throws {
         let content: SCShareableContent
         do {
             content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
@@ -505,6 +600,14 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
                 excludingApplications: apps,
                 exceptingWindows: []
             )
+        case .microphone:
+            // 麦克风路径在 start 顶层已分流，不应到达此处。
+            clearSession(ifMatching: sessionID)
+            throw TranscriberError.captureFailed("内部错误：麦克风源进入系统音频路径")
+        }
+        guard let analyzerFormat = analyzerFormatMutex.withLock({ $0 }) else {
+            clearSession(ifMatching: sessionID)
+            throw TranscriberError.captureFailed("内部错误：分析器格式未就绪")
         }
         let config = SCStreamConfiguration()
         config.capturesAudio = true
@@ -539,13 +642,83 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
         }
     }
 
+    /// 麦克风采集路径（AVCaptureSession）：会议/口语练习/外接麦克风场景。
+    /// 不走 ScreenCaptureKit，不需要屏幕录制权限；复用同一 SpeechAnalyzer
+    /// 识别管线与句子提交/回滚/导出链路。
+    private func startMicrophoneCapture(
+        deviceID: String, deviceName: String, sessionID: UUID
+    ) async throws {
+        // 麦克风权限：显式请求（未决定时弹系统提示；已拒绝时直接失败，
+        // 给出比"采集失败"更明确的指引）。
+        let granted = await AVCaptureDevice.requestAccess(for: .audio)
+        guard granted else {
+            clearSession(ifMatching: sessionID)
+            throw TranscriberError.microphonePermissionDenied
+        }
+
+        guard let device = AVCaptureDevice(uniqueID: deviceID) else {
+            // 设备缺失即报错（区别于系统音频"app 未运行回退全系统"的宽容策略）。
+            clearSession(ifMatching: sessionID)
+            throw TranscriberError.microphoneDeviceUnavailable(deviceName)
+        }
+
+        let captureSession = AVCaptureSession()
+        guard let input = try? AVCaptureDeviceInput(device: device) else {
+            clearSession(ifMatching: sessionID)
+            throw TranscriberError.captureFailed("无法创建麦克风输入")
+        }
+        let output = AVCaptureAudioDataOutput()
+        guard captureSession.canAddInput(input), captureSession.canAddOutput(output) else {
+            clearSession(ifMatching: sessionID)
+            throw TranscriberError.captureFailed("无法配置麦克风采集会话")
+        }
+
+        captureSession.beginConfiguration()
+        captureSession.addInput(input)
+        output.setSampleBufferDelegate(self, queue: .global(qos: .userInitiated))
+        captureSession.addOutput(output)
+        captureSession.commitConfiguration()
+
+        self.captureSession = captureSession
+
+        // 运行期错误观察（spec A 故事6）：设备拔出、会话被系统中断等。
+        // 路由到 onError 展示，不静默失败；stop() 时移除观察。
+        let observer = NotificationCenter.default.addObserver(
+            forName: AVCaptureSession.runtimeErrorNotification,
+            object: captureSession,
+            queue: .main
+        ) { [weak self] notification in
+            // userInfo[AVCaptureSessionErrorKey] 是 NSError（无 Swift 重命名，用原始字符串键）
+            let reason = (notification.userInfo?["AVCaptureSessionErrorKey"] as? LocalizedError)?
+                .localizedDescription ?? "麦克风采集中断"
+            Self.audioLogger.error("capture session runtime error: \(reason)")
+            MainActor.assumeIsolated {
+                self?.onError?("麦克风采集失败：\(reason)。请重新选择音频来源。")
+                self?.stop()
+            }
+        }
+        runtimeErrorObserverMutex.withLock { $0 = observer }
+
+        // AVCaptureSession 要求单线程使用；start 与 stop 统一在主线程。
+        await MainActor.run {
+            captureSession.startRunning()
+        }
+        Self.audioLogger.notice("microphone capture started, device=\(device.localizedName)")
+    }
+
     func stop() {
         let streamToStop = stream
+        let captureSessionToStop = captureSession
         let analyzerToStop = analyzer
 
         activeSessionID = nil
         isRunningMutex.withLock { $0 = false }
         stream = nil
+        captureSession = nil
+        if let observer = runtimeErrorObserverMutex.withLock({ $0 }) {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        runtimeErrorObserverMutex.withLock { $0 = nil }
         analyzer = nil
         analyzerFormatMutex.withLock { $0 = nil }
         converterMutex.withLock { $0 = nil }
@@ -560,6 +733,12 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
         let newStopTask = Task {
             await previousStopTask?.value
             try? await streamToStop?.stopCapture()
+            // AVCaptureSession.stopRunning 必须在主线程调用
+            if let captureSessionToStop {
+                await MainActor.run {
+                    captureSessionToStop.stopRunning()
+                }
+            }
             await analyzerToStop?.cancelAndFinishNow()
         }
         stopTaskMutex.withLock { $0 = newStopTask }
@@ -709,16 +888,31 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
         return CMTimeRangeGetUnion(existing, otherRange: newRange)
     }
 
-    // MARK: - SCStreamOutput
+    // MARK: - 音频回调（SCStreamOutput 与 AVCaptureAudioDataOutputSampleBufferDelegate）
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .audio else { return }
+        processAudioSampleBuffer(sampleBuffer, sourceStream: stream)
+    }
+
+    /// AVCaptureAudioDataOutput 回调：麦克风采集的音频帧。
+    func captureOutput(
+        _ output: AVCaptureOutput,
+        didOutput sampleBuffer: CMSampleBuffer,
+        from connection: AVCaptureConnection
+    ) {
+        processAudioSampleBuffer(sampleBuffer, sourceStream: nil)
+    }
+
+    /// 两条采集路径（SCStream / AVCaptureSession）共用音频处理：取快照、
+    /// 格式转换、yield 给识别器。sourceStream 非 nil 时校验来源 SCStream。
+    private func processAudioSampleBuffer(_ sampleBuffer: CMSampleBuffer, sourceStream: SCStream?) {
         // 先取快照（受锁保护），避免与 start/stop 的写入竞争。
         // 注意：guard 条件内不能用尾随闭包（无法解析），先取出值再判断；
         // 只在识别器运行中处理音频，未运行时直接返回。
         let isRunning = isRunningMutex.withLock { $0 }
         guard isRunning else { return }
-        guard self.stream === stream else { return }
+        if let sourceStream { guard self.stream === sourceStream else { return } }
         guard sampleBuffer.isValid, sampleBuffer.numSamples > 0 else { return }
         guard let targetFormat = analyzerFormatMutex.withLock({ $0 }),
               let inputBuilder = inputBuilderMutex.withLock({ $0 }) else { return }
@@ -818,6 +1012,11 @@ enum TranscriberError: LocalizedError {
     case screenRecordingPermissionDenied
     /// SCStream 启动/采集失败，且非权限原因（如显示设备变更、GPU 资源不足、配置无效）。
     case captureFailed(String)
+    /// 选定的麦克风设备不存在（被拔出或从未连接）。spec A：设备缺失即报错，
+    /// 不做系统音频路径那种"目标 app 未运行回退全系统"的宽容处理。
+    case microphoneDeviceUnavailable(String)
+    /// 麦克风权限被拒绝，需引导用户到系统设置开启。
+    case microphonePermissionDenied
 
     var errorDescription: String? {
         switch self {
@@ -829,6 +1028,10 @@ enum TranscriberError: LocalizedError {
             "需要屏幕录制权限才能监听系统音频。请在系统设置 → 隐私与安全性 → 屏幕录制 中为本应用授权。"
         case let .captureFailed(detail):
             "系统音频采集失败：\(detail)。请确认没有其他应用占用屏幕录制，或稍后重试。"
+        case let .microphoneDeviceUnavailable(name):
+            "找不到麦克风「\(name)」，设备可能已断开。请重新选择音频来源。"
+        case .microphonePermissionDenied:
+            "需要麦克风权限才能采集语音。请在系统设置 → 隐私与安全性 → 麦克风 中为本应用授权。"
         }
     }
 }

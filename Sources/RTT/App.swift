@@ -549,18 +549,12 @@ final class AppState {
     }
 
     private static func loadAudioSourceFilter(from defaults: UserDefaults) -> AudioSourceFilter {
-        let key = defaults.string(forKey: "RTT.audioSourceFilter") ?? "allSystem"
-        if key == "allSystem" { return .allSystem }
-        if key.hasPrefix("only:") {
-            let bundleID = String(key.dropFirst("only:".count))
-            return bundleID.isEmpty ? .allSystem : .only(bundleID: bundleID)
+        // 编解码统一收口到 AudioSourceFilter(persistenceKey:)（spec A 抽出，
+        // 含麦克风设备键），此处只负责读键与兜底。
+        guard let key = defaults.string(forKey: "RTT.audioSourceFilter") else {
+            return .allSystem
         }
-        if key.hasPrefix("excluding:") {
-            let raw = String(key.dropFirst("excluding:".count))
-            let bundleIDs = raw.split(separator: ",").map(String.init)
-            return bundleIDs.isEmpty ? .allSystem : .excluding(bundleIDs: bundleIDs)
-        }
-        return .allSystem
+        return AudioSourceFilter(persistenceKey: key)
     }
 
     // MARK: - 术语表持久化（痛点2）

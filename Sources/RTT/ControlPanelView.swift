@@ -315,6 +315,19 @@ struct ControlPanelView: View {
             ForEach(commonMediaApps, id: \.bundleID) { app in
                 Button("仅 \(app.name)") { appState.audioSourceFilter = .only(bundleID: app.bundleID) }
             }
+            Divider()
+            // spec A：麦克风采集（会议/口语练习/外接麦克风场景）
+            let microphones = SystemAudioTranscriber.availableMicrophones()
+            Section("麦克风") {
+                ForEach(microphones) { mic in
+                    Button("🎙 \(mic.name)") {
+                        appState.audioSourceFilter = .microphone(deviceID: mic.id, name: mic.name)
+                    }
+                }
+                if microphones.isEmpty {
+                    Text("未检测到麦克风").foregroundColor(CPColor.secondaryText)
+                }
+            }
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: "speaker.wave.2.fill")
@@ -380,6 +393,8 @@ struct ControlPanelView: View {
                 }
             }
             return "排除 \(names.joined(separator: "/"))"
+        case let .microphone(_, name):
+            return name.isEmpty ? "麦克风" : "🎙 \(name)"
         }
     }
 

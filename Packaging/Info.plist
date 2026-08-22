@@ -30,6 +30,8 @@
     <true/>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>RTT 需要访问麦克风，以实时识别和翻译会议或口语练习中的语音（仅在选择麦克风作为音频来源时采集）。</string>
     <key>NSScreenCaptureUsageDescription</key>
     <string>RTT 需要捕获系统音频，以实时识别和翻译视频内容。</string>
     <key>NSSpeechRecognitionUsageDescription</key>
