@@ -73,7 +73,7 @@ enum TranscriptExporter {
         entries.map(exportedText(for:)).joined(separator: "\n\n")
     }
 
-    static func markdown(entries: [TranslationEntry]) -> String {
+    static func markdown(entries: [TranslationEntry], date: Date = Date()) -> String {
         var lines: [String] = []
         lines.append("# RTT 双语字幕记录")
         lines.append("")

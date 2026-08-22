@@ -226,9 +226,11 @@ struct ControlPanelView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 languageSection
+                audioSourceSection
                 languageAssetsSection
                 startStopSection
                 lowLatencySection
+                glossarySection
                 exportSection
                 copySection
                 if appState.hasFailedTranslations {
@@ -260,6 +262,93 @@ struct ControlPanelView: View {
                 .foregroundColor(CPColor.mutedText)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // 8.1b 音频来源过滤（痛点1：排除通知音）
+    private var audioSourceSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("音频来源").font(sectionTitleFont).foregroundColor(sectionTitleColor)
+            audioSourcePicker
+            Text("过滤掉通讯类 app 通知音，避免字幕被干扰")
+                .font(.system(size: 11))
+                .foregroundColor(CPColor.mutedText)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var audioSourcePicker: some View {
+        Menu {
+            Button("全部系统音频") { appState.audioSourceFilter = .allSystem }
+            Divider()
+            // 常见通讯类 app，可一键排除
+            Button("排除通讯类（微信/Slack/Teams/Discord）") {
+                appState.audioSourceFilter = .excluding(bundleIDs: [
+                    "com.tencent.xinWeChat",
+                    "com.tinyspeck.slackmacgap",
+                    "com.microsoft.teams2",
+                    "com.hnc.Discord",
+                ])
+            }
+            Divider()
+            // 仅捕获指定 app：列出常见浏览器与播放器
+            ForEach(commonMediaApps, id: \.bundleID) { app in
+                Button("仅 \(app.name)") { appState.audioSourceFilter = .only(bundleID: app.bundleID) }
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "speaker.wave.2")
+                    .font(.system(size: 14))
+                    .foregroundColor(CPColor.accent)
+                Text(audioSourceLabel)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(CPColor.primaryText)
+                Spacer()
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 10))
+                    .foregroundColor(CPColor.mutedText)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(CPColor.fieldBackground)
+            .overlay(capsuleBorder(corner: 12, color: CPColor.fieldBorder))
+        }
+        .menuStyle(.borderlessButton)
+    }
+
+    /// 常见媒体播放 app 列表（仅捕获它们的音频）。
+    private var commonMediaApps: [(name: String, bundleID: String)] {
+        [
+            ("Safari", "com.apple.Safari"),
+            ("Google Chrome", "com.google.Chrome"),
+            ("Firefox", "org.mozilla.firefox"),
+            ("Microsoft Edge", "com.microsoft.edgemac"),
+            ("VLC", "org.videolan.vlc"),
+            ("IINA", "com.colliderli.iina"),
+            ("QuickTime Player", "com.apple.QuickTimePlayerX"),
+        ]
+    }
+
+    private var audioSourceLabel: String {
+        switch appState.audioSourceFilter {
+        case .allSystem:
+            return "全部系统音频"
+        case let .only(bundleID):
+            if let app = commonMediaApps.first(where: { $0.bundleID == bundleID }) {
+                return "仅 \(app.name)"
+            }
+            return "仅 \(bundleID)"
+        case let .excluding(bundleIDs):
+            let names = bundleIDs.map { id -> String in
+                switch id {
+                case "com.tencent.xinWeChat": return "微信"
+                case "com.tinyspeck.slackmacgap": return "Slack"
+                case "com.microsoft.teams2": return "Teams"
+                case "com.hnc.Discord": return "Discord"
+                default: return id
+                }
+            }
+            return "排除 \(names.joined(separator: "/"))"
+        }
     }
 
     private var languagePicker: some View {
@@ -446,6 +535,79 @@ struct ControlPanelView: View {
         .padding(16)
         .background(CPColor.fieldBackground)
         .overlay(capsuleBorder(corner: 16, color: CPColor.fieldBorder))
+    }
+
+    // 8.5 术语表（痛点2：错译→正确译 查找替换）
+    @State private var glossaryWrongDraft = ""
+    @State private var glossaryCorrectDraft = ""
+
+    private var glossarySection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("术语表").font(sectionTitleFont).foregroundColor(sectionTitleColor)
+            Text("把反复出现的错译记下，之后所有译文自动替换。")
+                .font(.system(size: 11))
+                .foregroundColor(CPColor.mutedText)
+
+            HStack(spacing: 8) {
+                TextField("错译", text: $glossaryWrongDraft)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                    .padding(8)
+                    .background(CPColor.deepFieldBackground)
+                    .overlay(capsuleBorder(corner: 8, color: CPColor.fieldBorder))
+                TextField("正确", text: $glossaryCorrectDraft)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                    .padding(8)
+                    .background(CPColor.deepFieldBackground)
+                    .overlay(capsuleBorder(corner: 8, color: CPColor.fieldBorder))
+            }
+
+            Button {
+                guard !glossaryWrongDraft.isEmpty, !glossaryCorrectDraft.isEmpty else { return }
+                appState.upsertGlossaryPair(wrong: glossaryWrongDraft, correct: glossaryCorrectDraft)
+                glossaryWrongDraft = ""
+                glossaryCorrectDraft = ""
+            } label: {
+                Text("添加 / 覆盖")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(CPColor.primaryText)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 9)
+                    .background(CPColor.fieldBackground)
+                    .overlay(capsuleBorder(corner: 10, color: CPColor.fieldBorder))
+            }
+            .buttonStyle(.plain)
+            .disabled(glossaryWrongDraft.isEmpty || glossaryCorrectDraft.isEmpty)
+            .opacity(glossaryWrongDraft.isEmpty || glossaryCorrectDraft.isEmpty ? 0.4 : 1.0)
+
+            if !appState.glossary.pairs.isEmpty {
+                VStack(spacing: 6) {
+                    ForEach(Array(appState.glossary.pairs.enumerated()), id: \.element.wrong) { index, pair in
+                        HStack(spacing: 8) {
+                            Text("\(pair.wrong) → \(pair.correct)")
+                                .font(.system(size: 12))
+                                .foregroundColor(CPColor.secondaryText)
+                                .lineLimit(1)
+                            Spacer()
+                            Button {
+                                appState.removeGlossaryPair(at: index)
+                            } label: {
+                                Image(systemName: "trash")
+                                    .foregroundColor(CPColor.danger)
+                            }
+                            .buttonStyle(.plain)
+                            .help("删除此术语对")
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(CPColor.fieldBackground)
+                        .overlay(capsuleBorder(corner: 8, color: CPColor.fieldBorder))
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // 8.6 导出

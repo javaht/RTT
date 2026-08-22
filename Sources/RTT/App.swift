@@ -434,6 +434,28 @@ final class AppState {
         }
     }
 
+    // MARK: - 音频来源过滤（痛点1：排除通知音）
+    /// 音频来源过滤策略，持久化到 UserDefaults。
+    var audioSourceFilter: AudioSourceFilter = .allSystem {
+        didSet {
+            UserDefaults.standard.set(audioSourceFilter.persistenceKey, forKey: "RTT.audioSourceFilter")
+            if isTranslating { restartTranslation() }
+        }
+    }
+
+    // MARK: - 术语表（痛点2：错译查找替换，持久化）
+    /// 术语表变化时同步给翻译服务并落盘。
+    var glossary: Glossary = Glossary() {
+        didSet {
+            translationService.setGlossary(glossary)
+            persistGlossary()
+        }
+    }
+    /// 归档存储（痛点4）：被裁剪的旧条目落盘，导出时合并回内存窗口。
+    private let archive = ArchiveStore.defaultStore()
+    /// 翻译失败退避重试策略（痛点3）。
+    private let retryPolicy = TranslationRetryPolicy.default
+
     /// 用于菜单 disable 判断的正式条目副本
     var entriesForCopy: [TranslationEntry] {
         // 限制返回最近 N 条，避免长视频下全量复制带来的开销；
@@ -504,7 +526,52 @@ final class AppState {
         self.subtitleStylePreset = SubtitleStylePreset(rawValue: styleRaw) ?? .standard
         let modeRaw = defaults.string(forKey: "RTT.processingMode") ?? ProcessingMode.translation.rawValue
         self.processingMode = ProcessingMode(rawValue: modeRaw) ?? .translation
+        self.audioSourceFilter = Self.loadAudioSourceFilter(from: defaults)
+        self.glossary = Self.loadGlossary()
+        translationService.setGlossary(glossary)
         floatingPanel.setRecognitionOnly(isRecognitionOnly)
+    }
+
+    private static func loadAudioSourceFilter(from defaults: UserDefaults) -> AudioSourceFilter {
+        let key = defaults.string(forKey: "RTT.audioSourceFilter") ?? "allSystem"
+        if key == "allSystem" { return .allSystem }
+        if key.hasPrefix("only:") {
+            let bundleID = String(key.dropFirst("only:".count))
+            return bundleID.isEmpty ? .allSystem : .only(bundleID: bundleID)
+        }
+        if key.hasPrefix("excluding:") {
+            let raw = String(key.dropFirst("excluding:".count))
+            let bundleIDs = raw.split(separator: ",").map(String.init)
+            return bundleIDs.isEmpty ? .allSystem : .excluding(bundleIDs: bundleIDs)
+        }
+        return .allSystem
+    }
+
+    // MARK: - 术语表持久化（痛点2）
+    private static let glossaryKey = "RTT.glossary"
+
+    private static func loadGlossary() -> Glossary {
+        guard let data = UserDefaults.standard.data(forKey: glossaryKey),
+              let glossary = try? JSONDecoder().decode(Glossary.self, from: data) else {
+            return Glossary()
+        }
+        return glossary
+    }
+
+    private func persistGlossary() {
+        if let data = try? JSONEncoder().encode(glossary) {
+            UserDefaults.standard.set(data, forKey: Self.glossaryKey)
+        }
+    }
+
+    /// 追加一对术语并持久化（手动改译回填时调用）。
+    func upsertGlossaryPair(wrong: String, correct: String) {
+        glossary.upsert(.init(wrong: wrong, correct: correct))
+    }
+
+    /// 删除指定下标的术语对。
+    func removeGlossaryPair(at index: Int) {
+        glossary.remove(at: index)
     }
 
     func setupCallbacks() {
@@ -516,6 +583,13 @@ final class AppState {
         }
         floatingPanel.onCloseTranslationOnly = { [weak self] in
             self?.restoreControlPanelFromFloatingMode()
+        }
+        floatingPanel.onCorrectEntry = { [weak self] id, corrected in
+            guard let self else { return }
+            // 改译返回改译前的译文；非空则回填术语表，让后续相同错译自动替换。
+            if let oldTarget = self.floatingPanel.correctEntry(id: id, correctedTarget: corrected) {
+                self.glossary.upsert(.init(wrong: oldTarget, correct: corrected))
+            }
         }
     }
 
@@ -605,7 +679,7 @@ final class AppState {
                 }
             }
 
-            try await transcriber.start(locale: locale)
+            try await transcriber.start(locale: locale, audioSource: audioSourceFilter)
             isTranslationReady = true
             if shouldEnterFloatingTranslationMode {
                 enterFloatingTranslationMode()
@@ -1184,36 +1258,42 @@ final class AppState {
             )
         }
 
-        do {
-            if let result = try await translationService.translate(request.text) {
-                return .init(
-                    orderID: request.id,
-                    source: request.text,
-                    target: result,
-                    startTime: request.startTime,
-                    endTime: request.endTime
-                )
+        // 痛点3：翻译失败退避重试。瞬时网络抖动（DNS/TCP/Bing 5xx）在重试中多数可恢复，
+        // 避免立即落 ⚠️ 失败条目等用户手动重试。CancellationError 不重试（用户主动停止）。
+        var lastError: String?
+        for attempt in 0..<retryPolicy.maxAttempts {
+            do {
+                if let result = try await translationService.translate(request.text) {
+                    return .init(
+                        orderID: request.id,
+                        source: request.text,
+                        target: result,
+                        startTime: request.startTime,
+                        endTime: request.endTime
+                    )
+                }
+                // 翻译返回空：视为失败，按策略退避重试
+                lastError = "翻译失败（无结果）"
+            } catch is CancellationError {
+                return nil
+            } catch {
+                lastError = error.localizedDescription
             }
-            // 翻译返回空，追加原文并标记失败
-            return .init(
-                orderID: request.id,
-                source: request.text,
-                target: "⚠️ 翻译失败（无结果）",
-                startTime: request.startTime,
-                endTime: request.endTime
-            )
-        } catch is CancellationError {
-            return nil
-        } catch {
-            // 翻译失败：仍追加原文，让历史保留、可滚动，并显示错误原因
-            return .init(
-                orderID: request.id,
-                source: request.text,
-                target: "⚠️ 翻译失败: \(error.localizedDescription)",
-                startTime: request.startTime,
-                endTime: request.endTime
-            )
+            if let delay = retryPolicy.backoff(afterAttempt: attempt) {
+                try? await Task.sleep(for: delay)
+                guard !Task.isCancelled else { return nil }
+            }
         }
+
+        // 重试用尽：仍追加原文，让历史保留、可滚动，并显示错误原因
+        let failureMessage = lastError.map { "⚠️ 翻译失败: \($0)" } ?? "⚠️ 翻译失败（无结果）"
+        return .init(
+            orderID: request.id,
+            source: request.text,
+            target: failureMessage,
+            startTime: request.startTime,
+            endTime: request.endTime
+        )
     }
 
     private func commitTranslation(_ entry: TranslationEntry, id: Int, generation: Int, epoch: Int) {
@@ -1225,6 +1305,15 @@ final class AppState {
         for entry in ready {
             floatingPanel.append(entry: entry)
             textTracker.markAppended(orderID: entry.orderID)
+            // 痛点4：正式落盘的条目同步归档，被裁剪后导出仍可还原完整时间轴。
+            archive.append(ArchivedEntry(
+                orderID: entry.orderID,
+                source: entry.source,
+                target: entry.target,
+                userCorrected: entry.userCorrected,
+                startTime: entry.startTime,
+                endTime: entry.endTime
+            ))
         }
         canExport = true
     }
@@ -1278,8 +1367,30 @@ final class AppState {
     }
 
     func exportTranscript(format: TranscriptExportFormat) {
-        let entries = floatingPanel.entries
-        guard !entries.isEmpty else { return }
+        // 痛点4：合并归档 + 内存幸存窗口，还原被裁剪的旧条目。
+        // 归档按 orderID 顺序写入；内存窗口是归档的后缀。合并时去重：
+        // 先取归档中 orderID < 内存最旧条目 orderID 的部分（即被裁剪的），
+        // 再拼接内存全部条目，保持时间顺序。
+        let memoryEntries = floatingPanel.entries
+        guard !memoryEntries.isEmpty else { return }
+
+        let archived = archive.loadAll()
+        let merged: [TranslationEntry]
+        if let firstMemoryID = memoryEntries.first?.orderID, !archived.isEmpty {
+            // 内存最旧条目的 orderID；归档中 orderID < 它的为被裁剪的旧条目。
+            let trimmed = archived.filter { $0.orderID < firstMemoryID }
+            let archivedAsEntries = trimmed.map { TranslationEntry(
+                orderID: $0.orderID,
+                source: $0.source,
+                target: $0.target,
+                startTime: $0.startTime,
+                endTime: $0.endTime,
+                userCorrected: $0.userCorrected
+            )}
+            merged = archivedAsEntries + memoryEntries
+        } else {
+            merged = memoryEntries
+        }
 
         let panel = NSSavePanel()
         switch format {
@@ -1294,11 +1405,17 @@ final class AppState {
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
         do {
-            let content = TranscriptExporter.export(entries: entries, format: format)
+            let content = TranscriptExporter.export(entries: merged, format: format)
             try content.write(to: url, atomically: true, encoding: .utf8)
         } catch {
             showError("导出失败：\(error.localizedDescription)")
         }
+    }
+
+    /// 清空归档与内存记录（供“清空记录”入口调用，避免归档无限膨胀）。
+    func clearAllRecords() {
+        floatingPanel.clearEntries()
+        archive.clear()
     }
 
     private func elapsedTimelineTime() -> TimeInterval {

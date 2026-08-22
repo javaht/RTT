@@ -109,6 +109,26 @@ final class SegmentTable: @unchecked Sendable {
     }
 }
 
+/// 音频来源过滤策略。
+/// 痛点1：捕获整个显示器音频时，微信/Slack 通知音混入字幕导致断句错乱。
+/// 允许用户选择只听某 app 或排除通讯类 app。
+enum AudioSourceFilter: Sendable, Equatable {
+    /// 捕获全部系统音频（仅排除 RTT 自身），旧行为。
+    case allSystem
+    /// 只捕获指定 bundleIdentifier 的 app 音频。
+    case only(bundleID: String)
+    /// 捕获除指定 app 外的所有系统音频。
+    case excluding(bundleIDs: [String])
+
+    var persistenceKey: String {
+        switch self {
+        case .allSystem: "allSystem"
+        case let .only(bundleID): "only:" + bundleID
+        case let .excluding(bundleIDs): "excluding:" + bundleIDs.joined(separator: ",")
+        }
+    }
+}
+
 /// 捕获系统音频，并使用 macOS 26 的 SpeechAnalyzer 实时识别。
 ///
 /// 并发模型：`stream(_:didOutputSampleBuffer:)` 在 SCStream 全局队列被调用，
@@ -407,7 +427,7 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
 
     // MARK: - 生命周期
 
-    func start(locale: Locale) async throws {
+    func start(locale: Locale, audioSource: AudioSourceFilter = .allSystem) async throws {
         await stopTaskMutex.withLock { $0 }?.value
         guard !(isRunningMutex.withLock { $0 }) else { return }
 
@@ -459,7 +479,32 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
         }
         guard activeSessionID == sessionID else { throw CancellationError() }
 
-        let filter = SCContentFilter(display: display, excludingWindows: [])
+        // 痛点1：按 app 过滤音频源，排除通讯类 app 通知音。
+        let filter: SCContentFilter
+        switch audioSource {
+        case .allSystem:
+            filter = SCContentFilter(display: display, excludingWindows: [])
+        case let .only(bundleID):
+            let apps = content.applications.filter { $0.bundleIdentifier == bundleID }
+            if apps.isEmpty {
+                // 目标 app 未运行，回退到全系统音频避免静默失败。
+                filter = SCContentFilter(display: display, excludingWindows: [])
+            } else {
+                filter = SCContentFilter(
+                    display: display,
+                    including: apps,
+                    exceptingWindows: []
+                )
+            }
+        case let .excluding(bundleIDs):
+            let set = Set(bundleIDs)
+            let apps = content.applications.filter { set.contains($0.bundleIdentifier) }
+            filter = SCContentFilter(
+                display: display,
+                excludingApplications: apps,
+                exceptingWindows: []
+            )
+        }
         let config = SCStreamConfiguration()
         config.capturesAudio = true
         config.sampleRate = Int(analyzerFormat.sampleRate)

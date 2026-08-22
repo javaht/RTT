@@ -252,6 +252,10 @@ struct TranslationEntry: Identifiable, Equatable {
     var startTime: TimeInterval = 0
     var endTime: TimeInterval = 0
 
+    /// 用户手动改译后的译文（痛点2：翻错可手动修正）。
+    /// 设置后渲染/导出/复制优先使用此值。
+    var userCorrected: String?
+
     /// 失败标记前缀，与各处失败检测保持一致，避免散落的 hasPrefix 判断漏判。
     static let failurePrefix = "⚠️"
 
@@ -262,10 +266,11 @@ struct TranslationEntry: Identifiable, Equatable {
 
     /// 去除首尾空白后的干净文本；失败条目回退为原文。
     /// 用于复制/导出/渲染等所有消费点，统一行为。
+    /// 优先使用 userCorrected（手动改译）。
     var cleanedTarget: String {
-        let trimmed = target.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !isFailure else { return source.trimmingCharacters(in: .whitespacesAndNewlines) }
-        return trimmed
+        let value = (userCorrected ?? target).trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? source.trimmingCharacters(in: .whitespacesAndNewlines) : value
     }
 
     /// 干净原文。
@@ -310,6 +315,8 @@ final class FloatingPanelManager {
     var onToggleStart: (() -> Void)?
     var onToggleOriginal: (() -> Void)?
     var onCloseTranslationOnly: (() -> Void)?
+    /// 手动改译回调（痛点2）。设置后悬浮窗单句可长按改译。
+    var onCorrectEntry: ((UUID, String) -> Void)?
 
     /// 创建并显示悬浮窗。
     func show() {
@@ -330,7 +337,8 @@ final class FloatingPanelManager {
             recognitionOnly: recognitionOnlyMode,
             onToggleStart: onToggleStart ?? {},
             onToggleOriginal: onToggleOriginal ?? {},
-            onCloseTranslationOnly: onCloseTranslationOnly ?? {}
+            onCloseTranslationOnly: onCloseTranslationOnly ?? {},
+            onCorrectEntry: onCorrectEntry
         )
         let hosting = NSHostingView(rootView: view)
         let contentView = PanelContentView(hostingView: hosting)
@@ -455,7 +463,8 @@ final class FloatingPanelManager {
             recognitionOnly: recognitionOnlyMode,
             onToggleStart: onToggleStart ?? {},
             onToggleOriginal: onToggleOriginal ?? {},
-            onCloseTranslationOnly: onCloseTranslationOnly ?? {}
+            onCloseTranslationOnly: onCloseTranslationOnly ?? {},
+            onCorrectEntry: onCorrectEntry
         )
         hostingView?.needsLayout = true
     }
@@ -466,6 +475,19 @@ final class FloatingPanelManager {
         entries.append(entry)
         pruneExcessEntries()
         update()
+    }
+
+    /// 手动改译某条记录（痛点2：用户发现翻译错误时直接修正）。
+    /// 返回改译前的译文（非失败且与新译文不同时为非空），供调用方回填术语表。
+    func correctEntry(id: UUID, correctedTarget: String) -> String? {
+        guard let index = entries.firstIndex(where: { $0.id == id }) else { return nil }
+        let trimmed = correctedTarget.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let oldTarget = entries[index].target
+        entries[index].userCorrected = trimmed
+        update()
+        // 仅当原译文非失败且与新译文不同时，才值得回填术语表。
+        return (!entries[index].isFailure && oldTarget != trimmed) ? oldTarget : nil
     }
 
     /// 历史条目上限：超出后丢弃最旧条目，保持滚动记录而非无限累积。
@@ -537,8 +559,13 @@ struct TranscriptView: View {
     var onToggleStart: () -> Void
     var onToggleOriginal: () -> Void
     var onCloseTranslationOnly: () -> Void
+    /// 手动改译回调（痛点2）。nil 时不显示改译入口。
+    var onCorrectEntry: ((UUID, String) -> Void)?
 
     @State private var autoScroll = true
+    /// 正在手动改译的条目 id（痛点2）；nil 时不显示改译框。
+    @State private var correctingEntryID: UUID?
+    @State private var correctionDraft = ""
 
     private var style: SubtitleStyle {
         SubtitleStyle.resolve(preset: subtitleStyle, showOriginal: showOriginal)
@@ -562,10 +589,8 @@ struct TranscriptView: View {
                 ScrollView(.vertical, showsIndicators: true) {
                     LazyVStack(alignment: .leading, spacing: 12) {
                         ForEach(entries) { entry in
-                            if let text = translationText(entry.target) {
-                                translationOnlyLine(text)
-                                    .id(entry.id)
-                            }
+                            translationOnlyRow(entry)
+                                .id(entry.id)
                         }
 
                         if let provisionalEntry,
@@ -714,8 +739,7 @@ struct TranscriptView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 10) {
                         ForEach(entries) { entry in
-                            entryCard(source: entry.source, target: entry.target)
-                                .onTapGesture { onToggleOriginal() }
+                            entryRow(entry)
                                 .id(entry.id)
                         }
 
@@ -790,9 +814,76 @@ struct TranscriptView: View {
         )
     }
 
-    /// 单条字幕卡片（原文/译文按 showOriginal 切换）
+    // MARK: - 手动改译（痛点2）
+    /// 标准视图单条行：改译中显示编辑框，否则显示卡片（点击切换原/译，长按改译）。
     @ViewBuilder
-    private func entryCard(source: String, target: String, provisional: Bool = false) -> some View {
+    private func entryRow(_ entry: TranslationEntry) -> some View {
+        if correctingEntryID == entry.id {
+            correctionEditor(for: entry)
+        } else {
+            entryCard(source: entry.source, target: entry.target, isCorrected: entry.userCorrected != nil)
+                .onTapGesture { onToggleOriginal() }
+                .onLongPressGesture { beginCorrection(for: entry) }
+        }
+    }
+
+    /// 悬浮译文模式单条行：改译中显示编辑框，否则显示译文（长按改译）。
+    @ViewBuilder
+    private func translationOnlyRow(_ entry: TranslationEntry) -> some View {
+        if correctingEntryID == entry.id {
+            correctionEditor(for: entry)
+        } else if let text = translationText(entry.target) {
+            translationOnlyLine(text)
+                .onLongPressGesture { beginCorrection(for: entry) }
+        }
+    }
+
+    private func beginCorrection(for entry: TranslationEntry) {
+        correctingEntryID = entry.id
+        correctionDraft = entry.cleanedTarget
+    }
+
+    /// 内联改译编辑框：显示原文作参考 + 多行译文输入 + 保存/取消。
+    @ViewBuilder
+    private func correctionEditor(for entry: TranslationEntry) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(entry.source)
+                .font(.system(size: 12))
+                .foregroundColor(.white.opacity(0.6))
+            TextField("修改译文", text: $correctionDraft, axis: .vertical)
+                .textFieldStyle(.plain)
+                .font(.system(size: style.targetFontSize, weight: style.targetWeight))
+                .foregroundColor(.white)
+                .lineLimit(1...5)
+                .padding(8)
+                .background(Color.black.opacity(0.45))
+                .cornerRadius(6)
+            HStack(spacing: 14) {
+                Button("保存") {
+                    let trimmed = correctionDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        onCorrectEntry?(entry.id, trimmed)
+                    }
+                    correctingEntryID = nil
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.cyan)
+                Button("取消") { correctingEntryID = nil }
+                    .buttonStyle(.plain)
+                    .foregroundColor(.white.opacity(0.6))
+            }
+            .font(.caption)
+        }
+        .padding(8)
+        .background(Color.black.opacity(0.5))
+        .cornerRadius(6)
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.cyan.opacity(0.6), lineWidth: 1))
+    }
+
+    /// 单条字幕卡片（原文/译文按 showOriginal 切换）。
+    /// 青色边框提示手动改译（痛点2）：userCorrected 非空时显示。
+    @ViewBuilder
+    private func entryCard(source: String, target: String, provisional: Bool = false, isCorrected: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             if showOriginal {
                 Text(source)
@@ -812,6 +903,11 @@ struct TranscriptView: View {
             RoundedRectangle(cornerRadius: 6)
                 .fill(Color.white.opacity(provisional ? style.cardOpacity * 0.75 : style.cardOpacity))
         )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(isCorrected ? Color.cyan.opacity(0.55) : .clear, lineWidth: 1)
+        )
+        .help(isCorrected ? "已手动改译 · 长按可修改" : "长按可修改译文")
     }
 
     private func langLabel(_ id: String) -> String {
