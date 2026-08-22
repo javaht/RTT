@@ -8,7 +8,7 @@ import SwiftUI
 /// 统一收口到此处：一处定义，处处一致。
 @MainActor
 enum RTTWindow {
-    /// 创建 RTT 深色标准窗口（标题栏透明、可缩放、关而不释、居中）。
+    /// 创建 RTT 深色标准窗口（#9 视觉 B：透明标题栏 + 大圆角 + 玻璃底）。
     static func make(
         title: String,
         size: NSSize,
@@ -25,6 +25,7 @@ enum RTTWindow {
         window.title = title
         window.titleVisibility = hidesTitle ? .hidden : .visible
         window.titlebarAppearsTransparent = true
+        // 窗口不透明深底：玻璃叠层（panel/field 的白色低透明度）在其上才有对比。
         window.backgroundColor = NSColor(CPColor.windowBackground)
         window.isOpaque = true
         window.minSize = minSize

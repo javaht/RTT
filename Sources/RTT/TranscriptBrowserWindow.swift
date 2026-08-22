@@ -66,6 +66,8 @@ struct TranscriptBrowserView: View {
             }
         }
         .frame(minWidth: 480, minHeight: 360)
+        // #9 视觉 B：与控制面板/设置同款径向玻璃底，三窗口 chrome 统一。
+        .background { CPColor.appBackground }
     }
 
     // MARK: - 摘要区（故事 1/2/3/4/6/13）
@@ -98,7 +100,7 @@ struct TranscriptBrowserView: View {
                     .foregroundColor(CPColor.secondaryText)
             }
             if case let .failed(message) = controller.phase {
-                Text(message).font(.system(size: 11)).foregroundColor(.red)
+                Text(message).font(.system(size: 11)).foregroundColor(CPColor.danger)
             }
             if let summary = controller.cachedSummary(for: summaryTab) {
                 // 摘要完整可读（故事 6）：限高滚动而非截断
@@ -215,11 +217,11 @@ struct TranscriptBrowserView: View {
         VStack(alignment: .leading, spacing: 3) {
             Text(row.timestamp)
                 .font(.system(size: 10, weight: .medium).monospacedDigit())
-                .foregroundColor(row.isFailure ? .red : CPColor.secondaryText)
+                .foregroundColor(row.isFailure ? CPColor.danger : CPColor.secondaryText)
             if displayMode != .original {
                 Text(row.target)
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(row.isFailure ? .red : CPColor.primaryText)
+                    .foregroundColor(row.isFailure ? CPColor.danger : CPColor.primaryText)
             }
             if displayMode != .translated {
                 Text(row.source)

@@ -1,9 +1,9 @@
 import SwiftUI
 
 // MARK: - 颜色与视觉常量
-// 参考 SVG 色板，全部使用常量，避免在 body 里散落魔法色值。
-// 使用 hex 初始化，不依赖 asset catalog，避免改动打包资源。
-private extension Color {
+// 全部使用常量，避免在 body 里散落魔法色值；hex 初始化不依赖 asset catalog。
+/// `Color(hex:)` 为非 private：悬浮字幕 `SubtitleStyle`（FloatingPanel）也使用。
+extension Color {
     init(hex: UInt32, alpha: Double = 1.0) {
         let r = Double((hex >> 16) & 0xFF) / 255.0
         let g = Double((hex >> 8) & 0xFF) / 255.0
@@ -12,48 +12,58 @@ private extension Color {
     }
 }
 
-/// 控制面板与转写浏览器共用的深色配色（spec C 起浏览器窗口复用）。
+/// 控制面板、设置、转写浏览器共用的配色令牌（#9 视觉方向 B：深色玻璃质感）。
+///
+/// 色板取自重设计原型 `designs/rtt-redesign/` 的 B 方向：
+/// - 深底加径向色彩微渐变；面板/字段用白色低透明度叠层模拟玻璃；
+/// - 边框为白色 13%–20%；强调色青蓝 `#5ac8fa`；圆角 14–20px。
+/// 窗口背景 `windowBackground` 保持深色不透明（玻璃叠层的底）。
 enum CPColor {
-    // 采用专业 macOS Pro 级暗黑设计系统（沉稳、克制、大气）：
-    // 深炭灰/石墨层级，搭配 Apple 系统级专业蓝，去除刺眼高饱和霓虹色
-
-    // 窗口与工作区背景
-    static let appBackground = LinearGradient(
-        colors: [Color(hex: 0x14161B), Color(hex: 0x181A20)],
-        startPoint: .top,
-        endPoint: .bottom
+    // 窗口底：径向微渐变（原型 --bg-grad，B 方向）
+    static let appBackground = RadialGradient(
+        colors: [Color(hex: 0x16233A), Color(hex: 0x0A0D13)],
+        center: UnitPoint(x: 0.7, y: -0.1),
+        startRadius: 0,
+        endRadius: 700
     )
-    static let panelBackground = Color(hex: 0x1C1F26)
-    static let deepPanel = Color(hex: 0x16181E)
+    /// 窗口不透明底色（NSWindow.backgroundColor 用，玻璃叠层在其上）。
+    static let windowBackground = Color(hex: 0x0A0D13)
+    /// 面板玻璃叠层（原型 rgba(255,255,255,.065)）。
+    static let panelBackground = Color.white.opacity(0.065)
+    static let deepPanel = Color.white.opacity(0.045)
 
-    // 普通卡片 / 字段背景
-    static let fieldBackground = Color(hex: 0x222630)
-    static let deepFieldBackground = Color(hex: 0x121418)
+    // 卡片 / 字段玻璃叠层
+    static let fieldBackground = Color.white.opacity(0.08)
+    static let deepFieldBackground = Color.black.opacity(0.32)
 
-    // 基础边框与分割线
-    static let border = Color(hex: 0x333A48)
-    static let fieldBorder = Color(hex: 0x3D4657)
-    static let divider = Color(hex: 0x272C38)
-    /// 浏览器窗口背景色（与控制面板控制器硬编码值同款，集中定义避免分叉）。
-    static let windowBackground = Color(hex: 0x101827)
+    // 边框与分割线（白色低透明，玻璃质感）
+    static let border = Color.white.opacity(0.13)
+    static let fieldBorder = Color.white.opacity(0.2)
+    static let divider = Color.white.opacity(0.09)
 
-    // 下拉框与交互控件：清晰的卡片衬底 + 柔和清晰的高亮边框
-    static let pickerBackground = Color(hex: 0x282D3B)
-    static let pickerHover = Color(hex: 0x313747)
-    static let pickerBorder = Color(hex: 0x4D5870)
-    static let pickerHandleBg = Color(hex: 0x343B4D) // 沉稳的次级胶囊背景
+    // 下拉框与交互控件
+    static let pickerBackground = Color.white.opacity(0.08)
+    static let pickerHover = Color.white.opacity(0.14)
+    static let pickerBorder = Color.white.opacity(0.2)
+    static let pickerHandleBg = Color.white.opacity(0.12)
 
-    // 主题色与强调色：经典 macOS 科技蓝（沉稳大气）
-    static let accent = Color(hex: 0x3B82F6)          // Apple Pro 蓝
-    static let accentSecondary = Color(hex: 0x2563EB) // 深科技蓝
-    static let accentLight = Color(hex: 0x60A5FA)     // 柔和亮蓝（用于高亮图标/文字）
-    static let danger = Color(hex: 0xEF4444)          // 珊瑚红
-    static let success = Color(hex: 0x10B981)         // 翡翠绿
+    // 强调色：青蓝（原型 #5ac8fa 系）
+    static let accent = Color(hex: 0x5AC8FA)
+    static let accentSecondary = Color(hex: 0x8FDCFF)
+    static let accentLight = Color(hex: 0x8FDCFF)
+    static let danger = Color(hex: 0xFF6961)
+    static let success = Color(hex: 0x66D4A7)
+    /// 实时识别强调色（暖橙，区分"正在识别"与"已翻译"，玻璃底上可读）。
+    static let live = Color(hex: 0xFFB340)
 
-    // 文字与图标层级：舒适清晰的专业排版
-    static let primaryText = Color(hex: 0xF8FAFC)
-    static let secondaryText = Color(hex: 0xCBD5E1)
-    static let mutedText = Color(hex: 0x8E9BAE)
+    // 文字层级
+    static let primaryText = Color(hex: 0xF2F5FA)
+    static let secondaryText = Color(hex: 0xB6C2D4)
+    static let mutedText = Color(hex: 0x74829A)
+
+    // 圆角令牌（原型 14–20px）
+    static let radiusCard: CGFloat = 14
+    static let radiusWindow: CGFloat = 20
 }
 
 /// RTT 视频控制面板主视图。
@@ -109,9 +119,20 @@ struct ControlPanelView: View {
 
     private var statusBadge: some View {
         HStack(spacing: 8) {
+            // #9 状态胶囊呼吸圆点（原型 .pill.live .pill-dot + @keyframes pulse）。
+            // 翻译中→accent 青蓝 + 呼吸动画；空闲→muted 灰点静止。圆点本身即状态指示，不止靠颜色。
             Circle()
-                .fill(appState.isTranslating ? CPColor.danger : CPColor.mutedText)
-                .frame(width: 8, height: 8)
+                .fill(appState.isTranslating ? CPColor.accent : CPColor.mutedText)
+                .frame(width: 7, height: 7)
+                .shadow(color: appState.isTranslating ? CPColor.accent.opacity(0.6) : .clear, radius: 4)
+                .opacity(appState.isTranslating ? 0.35 : 1.0)
+                .animation(
+                    appState.isTranslating
+                        ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true)
+                        : .default,
+                    value: appState.isTranslating
+                )
+                .accessibilityHidden(true)
             Text(appState.isTranslating ? "翻译中" : "等待开始")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(CPColor.primaryText)
@@ -120,6 +141,8 @@ struct ControlPanelView: View {
         .padding(.vertical, 8)
         .background(CPColor.fieldBackground)
         .overlay(capsuleBorder(color: CPColor.fieldBorder))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(appState.isTranslating ? "状态：翻译中" : "状态：等待开始")
     }
 
     // MARK: - 双栏字幕工作区
@@ -359,7 +382,7 @@ struct ControlPanelView: View {
                         Text("重试失败翻译").font(.system(size: 13, weight: .semibold))
                         Spacer()
                     }
-                    .foregroundColor(.white)
+                    .foregroundColor(CPColor.primaryText)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 9)
                     .frame(maxWidth: .infinity)

@@ -36,28 +36,33 @@ struct SubtitleStyle {
     var borderColor: Color
     var borderOpacity: Double
 
+    /// #9 视觉 B：四种预设对齐重设计原型 `.sb-*` 色板。
+    /// - 默认：rgba(10,14,22,.82) 深玻璃底 + blur，#f0f3f8 字；
+    /// - 黑底：纯黑底白字；
+    /// - 透明：rgba(0,0,0,.18) 无模糊，靠文字阴影区分；
+    /// - 学习：rgba(10,14,22,.85) 深玻璃底 + 暖色 #ffe9a8 字。
     static func resolve(preset: SubtitleStylePreset, showOriginal: Bool) -> SubtitleStyle {
         switch preset {
         case .standard:
             return SubtitleStyle(
-                backgroundOpacity: 0.55,
+                backgroundOpacity: 0.82,
                 cardOpacity: 0.08,
-                sourceFontSize: 14,
-                targetFontSize: 15,
+                sourceFontSize: 12.5,
+                targetFontSize: 17,
                 sourceWeight: .regular,
-                targetWeight: .medium,
-                sourceColor: .white.opacity(0.7),
-                targetColor: .white,
+                targetWeight: .semibold,
+                sourceColor: .white.opacity(0.75),
+                targetColor: Color(hex: 0xF0F3F8),
                 textShadow: false,
                 borderColor: .white,
                 borderOpacity: 0.15
             )
         case .black:
             return SubtitleStyle(
-                backgroundOpacity: 0.85,
+                backgroundOpacity: 1.0,
                 cardOpacity: 0.12,
-                sourceFontSize: 14,
-                targetFontSize: 16,
+                sourceFontSize: 12.5,
+                targetFontSize: 17,
                 sourceWeight: .regular,
                 targetWeight: .semibold,
                 sourceColor: .white.opacity(0.85),
@@ -68,12 +73,12 @@ struct SubtitleStyle {
             )
         case .transparent:
             return SubtitleStyle(
-                backgroundOpacity: 0.0,
+                backgroundOpacity: 0.18,
                 cardOpacity: 0.04,
-                sourceFontSize: 14,
-                targetFontSize: 15,
+                sourceFontSize: 12.5,
+                targetFontSize: 17,
                 sourceWeight: .regular,
-                targetWeight: .medium,
+                targetWeight: .semibold,
                 sourceColor: .white.opacity(0.65),
                 targetColor: .white.opacity(0.95),
                 textShadow: true,
@@ -82,14 +87,14 @@ struct SubtitleStyle {
             )
         case .learning:
             return SubtitleStyle(
-                backgroundOpacity: 0.6,
+                backgroundOpacity: 0.85,
                 cardOpacity: 0.08,
                 sourceFontSize: 16,
                 targetFontSize: 14,
-                sourceWeight: .medium,
+                sourceWeight: .semibold,
                 targetWeight: .regular,
                 sourceColor: .white,
-                targetColor: .white.opacity(0.75),
+                targetColor: Color(hex: 0xFFE9A8).opacity(0.75),
                 textShadow: false,
                 borderColor: .white,
                 borderOpacity: 0.15
@@ -335,6 +340,7 @@ final class FloatingPanelManager {
             subtitleStyle: subtitleStyle,
             translationOnly: translationOnlyMode,
             recognitionOnly: recognitionOnlyMode,
+            isLocked: isLocked,
             onToggleStart: onToggleStart ?? {},
             onToggleOriginal: onToggleOriginal ?? {},
             onCloseTranslationOnly: onCloseTranslationOnly ?? {},
@@ -461,6 +467,7 @@ final class FloatingPanelManager {
             subtitleStyle: subtitleStyle,
             translationOnly: translationOnlyMode,
             recognitionOnly: recognitionOnlyMode,
+            isLocked: isLocked,
             onToggleStart: onToggleStart ?? {},
             onToggleOriginal: onToggleOriginal ?? {},
             onCloseTranslationOnly: onCloseTranslationOnly ?? {},
@@ -556,6 +563,8 @@ struct TranscriptView: View {
     var subtitleStyle: SubtitleStylePreset
     var translationOnly: Bool
     var recognitionOnly: Bool
+    /// 悬浮窗是否已锁定（#9：右上角显示锁定角标，无障碍辅助非纯靠颜色）。
+    var isLocked: Bool
     var onToggleStart: () -> Void
     var onToggleOriginal: () -> Void
     var onCloseTranslationOnly: () -> Void
@@ -639,6 +648,18 @@ struct TranscriptView: View {
             .padding(.leading, 30)
             .padding(.top, 14)
             .help("关闭悬浮译文并返回主窗口")
+
+            // #9 锁定角标：原型右上角小锁，无障碍辅助（不止靠颜色区分锁定态）。
+            if isLocked {
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(0.55))
+                    .padding(.trailing, 30)
+                    .padding(.top, 14)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .accessibilityLabel("字幕窗已锁定")
+                    .allowsHitTesting(false)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black.opacity(0.78))
@@ -702,10 +723,12 @@ struct TranscriptView: View {
             // 顶部工具条
             HStack {
                 if isTranslating {
+                    // #9 录制圆点：用 accent 而非纯红，玻璃底上更协调；呼吸动画呼应原型 pill-dot。
                     Circle()
-                        .fill(Color.red)
+                        .fill(CPColor.accent)
                         .frame(width: 8, height: 8)
                         .opacity(0.9)
+                        .accessibilityHidden(true)
                     Text("翻译中")
                         .font(.caption)
                         .foregroundColor(.white.opacity(0.7))
@@ -718,7 +741,7 @@ struct TranscriptView: View {
                         .font(.caption)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
-                        .background(Color.blue.opacity(0.8))
+                        .background(CPColor.accent.opacity(0.8))
                         .cornerRadius(4)
                     }
                     .buttonStyle(.plain)
@@ -757,21 +780,22 @@ struct TranscriptView: View {
                         if isTranslating && !liveText.isEmpty {
                             HStack(spacing: 4) {
                                 Circle()
-                                    .fill(Color.orange)
+                                    .fill(CPColor.live)
                                     .frame(width: 6, height: 6)
+                                    .accessibilityHidden(true)
                                 Text(LanguageDisplay.short(for: liveLangId))
                                     .font(.caption2)
-                                    .foregroundColor(.orange.opacity(0.7))
+                                    .foregroundColor(CPColor.live.opacity(0.8))
                                 Text(liveText)
                                     .font(.system(size: 13))
-                                    .foregroundColor(.orange.opacity(0.9))
+                                    .foregroundColor(CPColor.live.opacity(0.95))
                                     .lineLimit(3)
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(8)
                             .background(
                                 RoundedRectangle(cornerRadius: 6)
-                                    .fill(Color.orange.opacity(0.08))
+                                    .fill(CPColor.live.opacity(0.08))
                             )
                             .id("live")
                         }
@@ -867,7 +891,7 @@ struct TranscriptView: View {
                     correctingEntryID = nil
                 }
                 .buttonStyle(.plain)
-                .foregroundColor(.cyan)
+                .foregroundColor(CPColor.accent)
                 Button("取消") { correctingEntryID = nil }
                     .buttonStyle(.plain)
                     .foregroundColor(.white.opacity(0.6))
@@ -877,7 +901,7 @@ struct TranscriptView: View {
         .padding(8)
         .background(Color.black.opacity(0.5))
         .cornerRadius(6)
-        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.cyan.opacity(0.6), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(CPColor.accent.opacity(0.6), lineWidth: 1))
     }
 
     /// 单条字幕卡片（原文/译文按 showOriginal 切换）。
@@ -905,7 +929,7 @@ struct TranscriptView: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 6)
-                .stroke(isCorrected ? Color.cyan.opacity(0.55) : .clear, lineWidth: 1)
+                .stroke(isCorrected ? CPColor.accent.opacity(0.55) : .clear, lineWidth: 1)
         )
         .help(isCorrected ? "已手动改译 · 长按可修改" : "长按可修改译文")
     }

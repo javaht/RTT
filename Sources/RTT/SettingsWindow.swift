@@ -104,7 +104,8 @@ struct SettingsView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
         }
-        .background(CPColor.windowBackground)
+        // #9 视觉 B：与控制面板同款径向玻璃底，三窗口 chrome 统一。
+        .background { CPColor.appBackground }
     }
 
     @ViewBuilder
@@ -215,9 +216,10 @@ struct SettingsView: View {
                             appState.removeGlossaryPair(at: index)
                         } label: {
                             Image(systemName: "minus.circle")
-                                .foregroundColor(.red)
+                                .foregroundColor(CPColor.danger)
                         }
                         .buttonStyle(.plain)
+                        .help("删除此术语对")
                     }
                 }
                 HStack {
