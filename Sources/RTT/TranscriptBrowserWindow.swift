@@ -9,39 +9,21 @@ final class TranscriptBrowserWindowController {
     @discardableResult
     func show(appState: AppState) -> NSWindow {
         if let window {
-            focus(window)
+            RTTWindow.focus(window)
             return window
         }
 
-        let view = TranscriptBrowserView(appState: appState)
-        let hostingView = NSHostingView(rootView: view)
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 680, height: 560),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-            backing: .buffered,
-            defer: false
+        let hostingView = NSHostingView(rootView: TranscriptBrowserView(appState: appState))
+        let window = RTTWindow.make(
+            title: "转写记录",
+            size: NSSize(width: 680, height: 560),
+            minSize: NSSize(width: 480, height: 360)
         )
-        window.title = "转写记录"
-        window.titlebarAppearsTransparent = true
-        window.backgroundColor = NSColor(CPColor.windowBackground)
-        window.isOpaque = true
-        window.minSize = NSSize(width: 480, height: 360)
         window.contentView = hostingView
-        window.isReleasedWhenClosed = false
-        window.collectionBehavior = [.moveToActiveSpace]
-        window.center()
-        focus(window)
+        RTTWindow.focus(window)
 
         self.window = window
         return window
-    }
-
-    private func focus(_ window: NSWindow) {
-        window.makeKeyAndOrderFront(nil)
-        window.orderFrontRegardless()
-        NSApp.activate(ignoringOtherApps: true)
-        NSRunningApplication.current.activate(options: [.activateAllWindows])
     }
 }
 

@@ -1436,8 +1436,9 @@ final class AppState {
         // 痛点4：合并归档 + 内存幸存窗口，还原被裁剪的旧条目
         // （合并规则收口到 TranscriptBrowser.mergedEntries，与浏览器/摘要同源）。
         let memoryEntries = floatingPanel.entries
-        guard !memoryEntries.isEmpty else { return }
-        let merged = TranscriptBrowser.mergedEntries(memory: memoryEntries, archived: archive.loadAll())
+        let archived = archive.loadAll()
+        guard !memoryEntries.isEmpty || !archived.isEmpty else { return }
+        let merged = TranscriptBrowser.mergedEntries(memory: memoryEntries, archived: archived)
 
         let panel = NSSavePanel()
         switch format {
@@ -1449,16 +1450,29 @@ final class AppState {
         panel.allowedContentTypes = [format.contentType]
         panel.canCreateDirectories = true
 
+        // spec C 故事 15：摘要"可选"追加——Markdown 导出且已有缓存摘要时，
+        // 在保存面板提供复选框（默认附加，可取消以导出纯字幕）。
+        // 模态前捕获 checkbox 引用，模态后直接读其 state，
+        // 不按 accessoryView 子视图顺序脆弱重取。
+        let cachedSummary = summaryController.cachedSummary(for: .translated)
+            ?? summaryController.cachedSummary(for: .original)
+        var summaryCheckbox: NSButton?
+        if format == .markdown, cachedSummary != nil {
+            let checkbox = NSButton(checkboxWithTitle: "附加会话摘要", target: nil, action: nil)
+            checkbox.state = .on
+            let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+            checkbox.frame = accessory.bounds
+            accessory.addSubview(checkbox)
+            panel.accessoryView = accessory
+            summaryCheckbox = checkbox
+        }
+
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
         do {
-            // Markdown 且已有摘要时附加摘要段落（spec C 故事 15）：
-            // 优先译文摘要，只有原文摘要时回退原文——只生成了原文摘要的用户
-            // 也能把摘要带出去。
-            let summary: String? = format == .markdown
-                ? (summaryController.cachedSummary(for: .translated)
-                    ?? summaryController.cachedSummary(for: .original))
-                : nil
+            // 优先译文摘要，只有原文摘要时回退原文——只生成了原文摘要的用户也能带出去
+            let includeSummary = summaryCheckbox?.state == .on
+            let summary: String? = includeSummary ? cachedSummary : nil
             let content = TranscriptExporter.export(entries: merged, format: format, summary: summary)
             try content.write(to: url, atomically: true, encoding: .utf8)
         } catch {

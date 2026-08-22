@@ -32,6 +32,8 @@
     <string>NSApplication</string>
     <key>SUFeedURL</key>
     <string>https://github.com/javaht/RTT/releases/latest/download/appcast.xml</string>
+    <!-- 占位 sentinel：与 Sources/RTT/UpdaterService.swift 的 edKeyPlaceholder
+         必须逐字一致，否则占位检测静默失配。配置真实 EdDSA 公钥时替换本值（README 有步骤）。 -->
     <key>SUPublicEDKey</key>
     <string>REPLACE_WITH_ED25519_PUBLIC_KEY</string>
     <key>SUScheduledCheckInterval</key>

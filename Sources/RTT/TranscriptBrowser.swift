@@ -29,22 +29,26 @@ enum TranscriptBrowser {
     /// 归档 + 内存窗口合并：内存条目为权威（归档中 orderID >= 内存最旧条目的
     /// 是重复），归档中被裁剪的旧条目按时间序拼接在前。
     /// 与导出（exportTranscript）同一规则，原内联逻辑抽到此处共用。
+    /// 内存窗口为空时回退返回全部归档条目（浏览器/导出不应因条目被裁剪而空白）。
     static func mergedEntries(
         memory: [TranslationEntry], archived: [ArchivedEntry]
     ) -> [TranslationEntry] {
-        guard !memory.isEmpty else { return [] }
-        guard let firstMemoryID = memory.first?.orderID else { return memory }
-        let trimmed = archived.filter { $0.orderID < firstMemoryID }
-        let archivedAsEntries = trimmed.map {
-            TranslationEntry(
-                orderID: $0.orderID,
-                source: $0.source,
-                target: $0.target,
-                startTime: $0.startTime,
-                endTime: $0.endTime,
-                userCorrected: $0.userCorrected
-            )
+        let archivedAsEntries = { (entries: [ArchivedEntry]) in
+            entries.map {
+                TranslationEntry(
+                    orderID: $0.orderID,
+                    source: $0.source,
+                    target: $0.target,
+                    startTime: $0.startTime,
+                    endTime: $0.endTime,
+                    userCorrected: $0.userCorrected
+                )
+            }
         }
-        return archivedAsEntries + memory
+        guard let firstMemoryID = memory.first?.orderID else {
+            return archivedAsEntries(archived)
+        }
+        let trimmed = archived.filter { $0.orderID < firstMemoryID }
+        return archivedAsEntries(trimmed) + memory
     }
 }

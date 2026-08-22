@@ -13,28 +13,19 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     func show(appState: AppState) -> NSWindow {
         dockController.setVisible(true, for: .settingsWindow)
         if let window {
-            focus(window)
+            RTTWindow.focus(window)
             return window
         }
 
         let hostingView = NSHostingView(rootView: SettingsView(appState: appState))
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 680, height: 520),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-            backing: .buffered,
-            defer: false
+        let window = RTTWindow.make(
+            title: AppString.settings.text(),
+            size: NSSize(width: 680, height: 520),
+            minSize: NSSize(width: 560, height: 420),
+            delegate: self
         )
-        window.title = AppString.settings.text()
-        window.titlebarAppearsTransparent = true
-        window.backgroundColor = NSColor(CPColor.windowBackground)
-        window.isOpaque = true
-        window.minSize = NSSize(width: 560, height: 420)
         window.contentView = hostingView
-        window.isReleasedWhenClosed = false
-        window.delegate = self
-        window.collectionBehavior = [.moveToActiveSpace]
-        window.center()
-        focus(window)
+        RTTWindow.focus(window)
 
         self.window = window
         return window
@@ -42,12 +33,6 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         dockController.setVisible(false, for: .settingsWindow)
-    }
-
-    private func focus(_ window: NSWindow) {
-        window.makeKeyAndOrderFront(nil)
-        window.orderFrontRegardless()
-        NSApp.activate(ignoringOtherApps: true)
     }
 }
 
@@ -149,6 +134,12 @@ struct SettingsView: View {
                         .font(.system(size: 12).monospacedDigit())
                 }
                 Toggle("自动检查更新", isOn: autoCheckBinding)
+                    .disabled(!appState.updaterService.isConfigured)
+                if let reason = appState.updaterService.unavailableReason {
+                    Text(reason)
+                        .font(.system(size: 11))
+                        .foregroundColor(CPColor.secondaryText)
+                }
                 Button(AppString.checkForUpdates.text()) {
                     appState.updaterService.checkForUpdates()
                 }
@@ -170,7 +161,7 @@ struct SettingsView: View {
                     }
                 }
                 .labelsHidden()
-                Text("设备端不可用时自动回退 Bing（当前生效：\(appState.activeEngineName)）")
+                Text("选择只捕获某个 app、排除通讯通知音，或从麦克风采集")
                     .font(.system(size: 11))
                     .foregroundColor(CPColor.secondaryText)
             }
@@ -189,7 +180,7 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.radioGroup)
                 .labelsHidden()
-                Text("设备端在本机翻译、字幕不出本机")
+                Text("设备端在本机翻译、字幕不出本机；不可用时自动回退 Bing（当前生效：\(appState.activeEngineName)）")
                     .font(.system(size: 11))
                     .foregroundColor(CPColor.secondaryText)
             }

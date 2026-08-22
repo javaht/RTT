@@ -61,6 +61,17 @@ struct LocalizationAndSettingsTests {
         #expect(!service.currentVersion.isEmpty)
     }
 
+    @Test
+    func updaterNoBundleEnvironmentReportsNoBundleAvailability() {
+        // 测试运行器无 app bundle：availability 应为 .noBundle（而非误报占位密钥），
+        // 且有对应的用户可读原因——swift run 用户看到的提示不能是"密钥未配置"
+        let service = UpdaterService(defaults: UserDefaults(suiteName: "rtt-test-updater-avail")!)
+        #expect(service.availability == .noBundle)
+        #expect(service.isConfigured == false)
+        let reason = service.unavailableReason
+        #expect(reason != nil && !reason!.contains("密钥"))
+    }
+
     // MARK: - DockVisibilityController 引用计数
 
     @Test
