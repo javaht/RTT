@@ -59,6 +59,10 @@ fi
 for framework in "$RTT_FRAMEWORKS_DIR"/*.dylib; do
     codesign "${RTT_CODESIGN_OPTIONS[@]}" "$framework"
 done
+# spec D：Sparkle framework（通用二进制，随 arm64 基包拷入）合并后重签
+if [[ -d "$RTT_FRAMEWORKS_DIR/Sparkle.framework" ]]; then
+    codesign --force --deep --timestamp=none --sign "$RTT_SIGNING_IDENTITY" "$RTT_FRAMEWORKS_DIR/Sparkle.framework"
+fi
 codesign "${RTT_CODESIGN_OPTIONS[@]}" "$RTT_UNIVERSAL_APP/Contents/Resources/gawk"
 codesign \
     "${RTT_CODESIGN_OPTIONS[@]}" \

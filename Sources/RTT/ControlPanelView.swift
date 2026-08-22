@@ -304,14 +304,9 @@ struct ControlPanelView: View {
         Menu {
             Button("全部系统音频") { appState.audioSourceFilter = .allSystem }
             Divider()
-            // 常见通讯类 app，可一键排除
+            // 常见通讯类 app，可一键排除（bundleID 集中定义于 CommunicationApps）
             Button("排除通讯类（微信/Slack/Teams/Discord）") {
-                appState.audioSourceFilter = .excluding(bundleIDs: [
-                    "com.tencent.xinWeChat",
-                    "com.tinyspeck.slackmacgap",
-                    "com.microsoft.teams2",
-                    "com.hnc.Discord",
-                ])
+                appState.audioSourceFilter = .excluding(bundleIDs: CommunicationApps.bundleIDs)
             }
             Divider()
             // 仅捕获指定 app：列出常见浏览器与播放器

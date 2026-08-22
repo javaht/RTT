@@ -12,7 +12,9 @@ struct RTTApp: App {
         MenuBarExtra {
             MenuBarExtraContent(
                 showControlPanel: appDelegate.showControlPanel,
-                showBrowser: appDelegate.showBrowser
+                showBrowser: appDelegate.showBrowser,
+                showSettings: appDelegate.showSettings,
+                checkForUpdates: appDelegate.checkForUpdates
             )
         } label: {
             Image(systemName: "captions.bubble")
@@ -26,19 +28,31 @@ struct MenuBarExtraContent: View {
     let showControlPanel: () -> NSWindow
     /// 打开转写浏览器（spec C 故事 14：控制面板与菜单双入口）。
     let showBrowser: () -> Void
+    /// 打开设置窗口（spec D 故事 11：菜单入口）。
+    let showSettings: () -> Void
+    /// 手动检查更新（spec D 故事 1）。
+    let checkForUpdates: () -> Void
 
     var body: some View {
-        Button("显示 RTT 主窗口") {
+        Button(AppString.showMainWindow.text()) {
             _ = showControlPanel()
         }
 
-        Button("转写记录与摘要") {
+        Button(AppString.transcriptBrowser.text()) {
             showBrowser()
+        }
+
+        Button(AppString.settings.text()) {
+            showSettings()
+        }
+
+        Button(AppString.checkForUpdates.text()) {
+            checkForUpdates()
         }
 
         Divider()
 
-        Button("退出 RTT") {
+        Button(AppString.quit.text()) {
             NSApplication.shared.terminate(nil)
         }
     }
@@ -51,9 +65,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let appState = AppState()
     let controlPanelWindowController = ControlPanelWindowController()
     let browserWindowController = TranscriptBrowserWindowController()
+    let settingsWindowController = SettingsWindowController()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApplication.shared.setActivationPolicy(.regular)
+        // spec D 故事 6：默认纯菜单栏形态（.accessory，无 Dock 图标）；
+        // 设置窗口等需要窗口切换的场景经 DockVisibilityController 临时切 .regular。
+        NSApplication.shared.setActivationPolicy(.accessory)
         appState.setupCallbacks()
         appState.onRequestHideControlPanel = { [weak self] in
             self?.controlPanelWindowController.hide()
@@ -86,6 +103,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 打开转写浏览器（spec C）：供菜单栏与 AppState 回调共用。
     func showBrowser() {
         _ = browserWindowController.show(appState: appState)
+    }
+
+    /// 打开设置窗口（spec D）：聚合现有设置，打开期间显示 Dock 图标。
+    func showSettings() {
+        _ = settingsWindowController.show(appState: appState)
+    }
+
+    /// 手动检查更新（spec D）：与兄弟入口方法对称，避免菜单栏两层深取值。
+    func checkForUpdates() {
+        appState.updaterService.checkForUpdates()
     }
 
     func applicationShouldHandleReopen(
@@ -524,6 +551,8 @@ final class AppState {
     }
     /// 打开转写浏览器窗口（AppDelegate 注入，spec C 故事 14）。
     var onRequestShowBrowser: (() -> Void)?
+    /// 应用内自动更新（spec D）。
+    let updaterService = UpdaterService()
 
     /// 已提交的 finalized 文本前缀（用于识别修正检测与增量提交）
     private var textTracker = CommittedTextTracker()

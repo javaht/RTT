@@ -30,6 +30,14 @@
     <true/>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <key>SUFeedURL</key>
+    <string>https://github.com/javaht/RTT/releases/latest/download/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>REPLACE_WITH_ED25519_PUBLIC_KEY</string>
+    <key>SUScheduledCheckInterval</key>
+    <integer>86400</integer>
+    <key>SUEnableInstallerConnectionService</key>
+    <true/>
     <key>NSMicrophoneUsageDescription</key>
     <string>RTT 需要访问麦克风，以实时识别和翻译会议或口语练习中的语音（仅在选择麦克风作为音频来源时采集）。</string>
     <key>NSScreenCaptureUsageDescription</key>

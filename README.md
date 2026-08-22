@@ -84,6 +84,28 @@ GitHub Actions 会分别在 Apple Silicon 和 Intel Runner 上构建，然后合
 
 默认使用临时签名，DMG 可以下载和运行，但 macOS 可能显示“无法验证开发者”。如果需要免警告分发，需要在 GitHub Actions 中配置 Apple Developer 的签名证书、公证凭据，并把工作流的签名步骤接入你的组织凭据管理。
 
+## 应用内自动更新（Sparkle）
+
+RTT 通过 [Sparkle 2](https://sparkle-project.org/) 提供应用内检查更新：菜单栏 → “检查更新…”，并默认每天自动检查一次（可在 设置 → 通用 关闭）。更新源为 GitHub Releases 的 `appcast.xml`（发版工作流自动生成并附加）。
+
+### 发版前的密钥配置（一次性）
+
+RTT 以临时签名（ad-hoc）分发，Sparkle 的更新校验依赖 **EdDSA 签名**（与代码签名独立）。启用自动更新需要仓库 owner 完成三步：
+
+1. 生成密钥对（本仓库构建后工具在 `.build/artifacts/sparkle/Sparkle/bin/`）：
+   ```bash
+   .build/artifacts/sparkle/Sparkle/bin/generate_keys
+   ```
+   公钥会输出到终端并被存入钥匙串；私钥**只此一次**完整显示。
+2. 把公钥填入 `Packaging/Info.plist` 的 `SUPublicEDKey`（替换 `REPLACE_WITH_ED25519_PUBLIC_KEY` 占位）。
+3. 把私钥存为仓库 secret：`SPARKLE_ED25519_PRIVATE_KEY`（Settings → Secrets and variables → Actions）。
+
+### 风险边界
+
+- **未完成上述配置时，所有自动更新都会被客户端拒绝**：客户端内置公钥（占位值）校验 appcast 的 EdDSA 签名，无签名的 feed 无法通过校验。这是防降级/防篡改的保护行为，不是故障；用户仍可手动下载 DMG 更新。
+- EdDSA 只校验更新包完整性；临时签名应用的 DMG 首次运行仍会触发 Gatekeeper “无法验证开发者”警告，与现状一致。
+- 公证（notarization）可消除该警告，属于独立的签名基础设施任务（本 spec 明确不做）。
+
 ## 权限与隐私
 
 - 系统音频由 RTT 捕获，并通过 Apple SpeechAnalyzer 在本机完成语音识别。

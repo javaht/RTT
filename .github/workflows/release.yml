@@ -87,6 +87,44 @@ jobs:
             "$GITHUB_WORKSPACE/dist" \
             "$VERSION"
 
+      - name: Generate Sparkle appcast
+        # spec D：为已发布更新归档生成 appcast feed，供 app 内 Sparkle 检查更新。
+        # 需要 EdDSA 私钥（仓库 secret SPARKLE_ED25519_PRIVATE_KEY）签名更新条目。
+        # 注意：二进制 artifact（含 generate_appcast）只在真正构建时提取，
+        # `swift package resolve` 不够——必须 `swift build`。
+        # 未配置 secret 时 feed 无签名，已配置 SUPublicEDKey 的客户端将拒绝
+        # 该更新（见 README 风险边界）。
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          SPARKLE_ED_KEY: ${{ secrets.SPARKLE_ED25519_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_VERSION#v}"
+          swift build 2>/dev/null || swift build
+          SPARKLE_BIN="$(find .build/artifacts/sparkle -name generate_appcast 2>/dev/null | head -1)"
+          if [[ -z "$SPARKLE_BIN" ]]; then
+            echo "Sparkle generate_appcast not found; skipping appcast" >&2
+            exit 0
+          fi
+          # 与归档同名的 .md 会被 generate_appcast 作为该版本的更新说明（spec D 故事 3）
+          NOTES="dist/RTT-$VERSION-universal.md"
+          LAST_TAG="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+          if [[ -n "$LAST_TAG" ]]; then
+            git log --oneline "$LAST_TAG..HEAD" > "$NOTES"
+          else
+            echo "RTT $VERSION" > "$NOTES"
+          fi
+          APPCAST_FLAGS=(--download-url-prefix \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/")
+          if [[ -n "$SPARKLE_ED_KEY" ]]; then
+            printf '%s' "$SPARKLE_ED_KEY" > "$RUNNER_TEMP/eddsa.key"
+            APPCAST_FLAGS+=("--ed-key-file=$RUNNER_TEMP/eddsa.key")
+          else
+            APPCAST_FLAGS+=(--disable-signing-warning)
+          fi
+          "$SPARKLE_BIN" "${APPCAST_FLAGS[@]}" dist/
+          rm -f "$RUNNER_TEMP/eddsa.key"
+
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
@@ -94,6 +132,7 @@ jobs:
           path: |
             dist/*.dmg
             dist/*.sha256
+            dist/appcast.xml
           if-no-files-found: error
           retention-days: 30
 
@@ -107,7 +146,9 @@ jobs:
           if [[ "$TAG" != v* ]]; then
             TAG="v$TAG"
           fi
-          gh release create "$TAG" dist/*.dmg dist/*.sha256 \
+          ASSETS=(dist/*.dmg dist/*.sha256)
+          [[ -f dist/appcast.xml ]] && ASSETS+=(dist/appcast.xml)
+          gh release create "$TAG" "${ASSETS[@]}" \
             --repo "$GITHUB_REPOSITORY" \
             --title "RTT ${TAG#v}" \
             --generate-notes

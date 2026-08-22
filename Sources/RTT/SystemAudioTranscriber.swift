@@ -167,6 +167,21 @@ struct MicrophoneDevice: Sendable, Equatable, Identifiable {
     let isBuiltIn: Bool
 }
 
+/// 一键排除的通讯类 app bundleID（spec A 痛点1）。集中定义避免控制面板与
+/// 设置窗口两处拷贝分叉。
+enum CommunicationApps {
+    static let bundleIDs = [
+        "com.tencent.xinWeChat",
+        "com.tinyspeck.slackmacgap",
+        "com.microsoft.teams2",
+        "com.hnc.Discord",
+    ]
+    /// 上述通讯类排除来源的持久化键，供菜单/设置页面引用同一值。
+    static var exclusionKey: String {
+        AudioSourceFilter.excluding(bundleIDs: bundleIDs).persistenceKey
+    }
+}
+
 /// 捕获系统音频，并使用 macOS 26 的 SpeechAnalyzer 实时识别。
 ///
 /// 并发模型：`stream(_:didOutputSampleBuffer:)` 在 SCStream 全局队列被调用，

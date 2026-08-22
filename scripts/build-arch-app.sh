@@ -44,6 +44,15 @@ cp "$RTT_PROJECT_DIR/Packaging/Info.plist" "$RTT_CONTENTS_DIR/Info.plist"
 cp -R "$RTT_BIN_DIR/RTT_RTT.bundle/Resources/." "$RTT_RESOURCES_DIR/"
 "$RTT_PROJECT_DIR/scripts/install-app-icon.sh" "$RTT_CONTENTS_DIR"
 
+# spec D 自动更新：Sparkle framework（SPM artifact，通用二进制）拷入 bundle 并挂 rpath
+RTT_SPARKLE_FW="$RTT_PROJECT_DIR/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+if [[ -d "$RTT_SPARKLE_FW" ]]; then
+    cp -R "$RTT_SPARKLE_FW" "$RTT_FRAMEWORKS_DIR/"
+    install_name_tool -add_rpath '@loader_path/../Frameworks' "$RTT_CONTENTS_DIR/MacOS/RTT"
+else
+    echo "warning: Sparkle.framework not found in SPM artifacts; update features disabled" >&2
+fi
+
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $RTT_VERSION" "$RTT_CONTENTS_DIR/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $RTT_BUILD_NUMBER" "$RTT_CONTENTS_DIR/Info.plist"
 
@@ -91,6 +100,10 @@ fi
 for framework in "$RTT_FRAMEWORKS_DIR"/*.dylib; do
     codesign "${RTT_CODESIGN_OPTIONS[@]}" "$framework"
 done
+# Sparkle framework 及其内嵌 XPC 服务随包签名
+if [[ -d "$RTT_FRAMEWORKS_DIR/Sparkle.framework" ]]; then
+    codesign --force --deep --timestamp=none --sign "$RTT_SIGNING_IDENTITY" "$RTT_FRAMEWORKS_DIR/Sparkle.framework"
+fi
 codesign "${RTT_CODESIGN_OPTIONS[@]}" "$RTT_RESOURCES_DIR/gawk"
 codesign \
     "${RTT_CODESIGN_OPTIONS[@]}" \
