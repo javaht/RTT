@@ -183,6 +183,10 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
     }
     /// 段级诊断日志（仅 DebugSegmentTable 开启时记录，便于真机确认引擎范围语义）
     private static let segmentLogger = Logger(subsystem: "com.rtt.transcriber", category: "segments")
+    /// 音频链路诊断日志：排查“启动正常但无识别结果”用，Console.app 按子系统过滤
+    private static let audioLogger = Logger(subsystem: "com.rtt.transcriber", category: "audio-path")
+    /// 回调收到的音频帧计数（诊断用）
+    private let audioFrameCount = Mutex(0)
 
     private static func logSegmentEvent(_ message: String) {
         guard debugSegmentTable else { return }
@@ -426,23 +430,20 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
         activeSessionID = sessionID
         isRunningMutex.withLock { $0 = true }
         segmentTable.reset()
+        audioFrameCount.withLock { $0 = 0 }
+        Self.audioLogger.notice("start: session=\(sessionID.uuidString) locale=\(locale.identifier(.bcp47))")
 
         guard let transcriber = await Self.makeTranscriber(locale: locale) else {
             clearSession(ifMatching: sessionID)
             throw TranscriberError.recognizerNotAvailable(locale.identifier)
         }
 
-        // 识别器修订已报告音频范围时（volatile results），标记该范围，
-        // 供 consume*Results 在下一个重叠 final 到达时做拼接替换。
-        // 注意：只有 inputSequence: 这个 init 支持 volatileRangeChangedHandler。
+        // 识别器输入流：回调把转换后的音频 yield 进来，analyzer 消费。
+        // 注意：必须用 init(modules:) + start(inputSequence:) 这个组合。
+        // init(inputSequence:) 已绑定流（AsyncStream 单消费者），再对其调
+        // start(inputSequence:) 会二次消费同一条流导致无识别结果。
         let (inputSequence, inputBuilder) = AsyncStream<AnalyzerInput>.makeStream()
-        let analyzer = SpeechAnalyzer(
-            inputSequence: inputSequence,
-            modules: [transcriber.module],
-            volatileRangeChangedHandler: { [weak self] range, _, _ in
-                self?.segmentTable.markVolatile(range)
-            }
-        )
+        let analyzer = SpeechAnalyzer(modules: [transcriber.module])
         guard let analyzerFormat = await SpeechAnalyzer.bestAvailableAudioFormat(
             compatibleWith: [transcriber.module]
         ) else {
@@ -455,14 +456,14 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
         self.inputBuilderMutex.withLock { $0 = inputBuilder }
         resultTask = makeResultTask(for: transcriber, sessionID: sessionID)
 
-        // 显式启动 analyzer 消费 inputSequence（inputSequence: init 只是绑定输入源，
-        // 不会自动开始处理；漏掉这一步音频会流入 AsyncStream 但无人消费）。
         do {
             try await analyzer.start(inputSequence: inputSequence)
         } catch {
+            Self.audioLogger.error("analyzer.start failed: \(error.localizedDescription)")
             clearSession(ifMatching: sessionID)
             throw error
         }
+        Self.audioLogger.notice("analyzer started")
 
         guard activeSessionID == sessionID else { throw CancellationError() }
 
@@ -526,9 +527,11 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
         do {
             try await stream.startCapture()
         } catch {
+            Self.audioLogger.error("startCapture failed: \(error.localizedDescription)")
             clearSession(ifMatching: sessionID)
             throw TranscriberError.captureFailed(error.localizedDescription)
         }
+        Self.audioLogger.notice("capture started, waiting for audio frames")
 
         guard activeSessionID == sessionID else {
             try? await stream.stopCapture()
@@ -726,6 +729,15 @@ final class SystemAudioTranscriber: NSObject, SCStreamOutput, @unchecked Sendabl
                   standardFormatWithSampleRate: streamDesc.mSampleRate,
                   channels: streamDesc.mChannelsPerFrame
               ) else { return }
+
+        // 诊断：记录首帧与每 500 帧的到达情况，确认 SCStream 是否真的在送音频
+        let frameIndex = audioFrameCount.withLock { state -> Int in
+            state += 1
+            return state
+        }
+        if frameIndex == 1 || frameIndex % 500 == 0 {
+            Self.audioLogger.notice("audio frame #\(frameIndex) rate=\(streamDesc.mSampleRate) ch=\(streamDesc.mChannelsPerFrame)")
+        }
 
         // converter 惰性创建：首帧音频到达时构造，输入格式变化（设备切换）时重建。
         // 在锁内原子完成 get-or-create；构造失败时保留旧值等下一帧重试。
