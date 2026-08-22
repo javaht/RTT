@@ -82,6 +82,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             _ = self.browserWindowController.show(appState: self.appState)
         }
+        appState.onRequestShowSettings = { [weak self] in
+            guard let self else { return }
+            _ = self.settingsWindowController.show(appState: self.appState)
+        }
         appState.refreshLanguageAssets()
 
         DispatchQueue.main.async { [weak self] in
@@ -551,6 +555,8 @@ final class AppState {
     }
     /// 打开转写浏览器窗口（AppDelegate 注入，spec C 故事 14）。
     var onRequestShowBrowser: (() -> Void)?
+    /// 打开设置窗口（AppDelegate 注入，#8 动作轨入口）。
+    var onRequestShowSettings: (() -> Void)?
     /// 应用内自动更新（spec D）。
     let updaterService = UpdaterService()
 
@@ -1095,13 +1101,22 @@ final class AppState {
         copyToPasteboard(text)
     }
 
+    /// 复制指定条目的文本（#8 行内复制）。
+    func copyText(source: String, target: String) {
+        let cleaned = cleanedCopyText(source: source, target: target)
+        copyToPasteboard(cleaned)
+    }
+
     /// 复制最近 N 条正式字幕，带时间轴。
     /// #6：随“复制最近 5 条”入口迁出控制面板，多条复制由转写浏览器的
     /// “复制全部”（按显示模式拼带时间轴文本）承担，此函数移除。
 
     private func copyText(for entry: TranslationEntry) -> String {
-        let source = entry.cleanedSource
-        let target = entry.cleanedTarget
+        cleanedCopyText(source: entry.cleanedSource, target: entry.cleanedTarget)
+    }
+
+    /// 统一的复制文本构造：目标为空或与源相同时只取源，否则原文+译文。
+    private func cleanedCopyText(source: String, target: String) -> String {
         guard !target.isEmpty, target != source else { return source }
         return "\(source)\n\(target)"
     }
@@ -1144,6 +1159,28 @@ final class AppState {
                 orderID: entry.orderID
             )
         }
+    }
+
+    /// 重试单条失败翻译（#8 行内重试）。
+    /// 与 retryFailedTranslations 同机制：递增 epoch、回退缓冲游标、移除旧失败条目、按原 orderID 重入队。
+    func retrySingleTranslation(orderID: Int) {
+        guard let entry = floatingPanel.entries.first(where: { $0.orderID == orderID }),
+              entry.isFailure else { return }
+
+        translationEpoch += 1
+        let epoch = translationEpoch
+        translationBuffer.rewind(to: orderID)
+        if nextTranslationID > orderID { nextTranslationID = orderID }
+        floatingPanel.removeEntries(withOrderIDs: [orderID])
+
+        enqueueTranslation(
+            entry.source,
+            startTime: entry.startTime,
+            endTime: entry.endTime,
+            generation: sessionGeneration,
+            epoch: epoch,
+            orderID: entry.orderID
+        )
     }
 
     // MARK: - 首次使用引导

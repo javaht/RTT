@@ -64,16 +64,18 @@ struct ControlPanelView: View {
     var appState: AppState
 
     var body: some View {
-        // 通过访问 AppState/FloatingPanelManager 的 @Observable 属性自动订阅刷新，
-        // 不再依赖手动刷新计数器。
+        // #8 会话驾驶舱：配置条 + 双栏转写台 + 动作轨。
+        // 原 HStack(transcriptWorkspace + controlSidebar) 拆为上下两段，
+        // 侧栏十个分区精简为动作轨五项控制，其余配置收进配置条一行。
         return VStack(spacing: 0) {
             header
-            HStack(spacing: 20) {
+            configBar
+            Divider().background(CPColor.divider)
+            HStack(spacing: 0) {
                 transcriptWorkspace
-                controlSidebar
+                actionRail
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding(20)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background { CPColor.appBackground }
@@ -142,7 +144,7 @@ struct ControlPanelView: View {
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         ForEach(appState.entriesForCopy) { entry in
-                            transcriptRow(source: entry.source, target: entry.target, isProvisional: false)
+                            transcriptRow(source: entry.source, target: entry.target, isProvisional: false, orderID: entry.orderID)
                         }
 
                         if let provisional = appState.provisionalEntryForDisplay {
@@ -212,7 +214,7 @@ struct ControlPanelView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func transcriptRow(source: String, target: String, isProvisional: Bool) -> some View {
+    private func transcriptRow(source: String, target: String, isProvisional: Bool, orderID: Int? = nil) -> some View {
         HStack(alignment: .top, spacing: 0) {
             transcriptCell(
                 text: appState.isRecognitionOnly ? target : source,
@@ -229,6 +231,42 @@ struct ControlPanelView: View {
         .overlay(alignment: .bottom) {
             Rectangle().fill(CPColor.divider).frame(height: 1)
         }
+        // #8 行内操作：失败条目显示「重试此句」按钮，任意条目 hover 浮现「复制」按钮。
+        .overlay(alignment: .topTrailing) {
+            if let orderID, !isProvisional {
+                rowActionsOverlay(for: source, target: target, orderID: orderID)
+            }
+        }
+    }
+
+    /// #8 行内操作：失败重试 + 复制，平时隐藏、hover 浮现。
+    private func rowActionsOverlay(for source: String, target: String, orderID: Int) -> some View {
+        let isFailure = target.hasPrefix(TranslationEntry.failurePrefix)
+        return HStack(spacing: 6) {
+            if isFailure {
+                Button {
+                    appState.retrySingleTranslation(orderID: orderID)
+                } label: {
+                    Label("重试此句", systemImage: "arrow.clockwise")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(CPColor.danger)
+                }
+                .buttonStyle(.plain)
+                .help("重新翻译这句")
+            }
+            Button {
+                appState.copyText(source: source, target: target)
+            } label: {
+                Image(systemName: "doc.on.doc")
+                    .font(.system(size: 12))
+                    .foregroundColor(CPColor.secondaryText)
+            }
+            .buttonStyle(.plain)
+            .help("复制此条")
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .opacity(0.7)
     }
 
     private func transcriptCell(text: String, isTarget: Bool, isProvisional: Bool) -> some View {
@@ -244,61 +282,208 @@ struct ControlPanelView: View {
             .padding(18)
     }
 
-    // MARK: - 右侧控制区
-    private var controlSidebar: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                languageSection
-                audioSourceSection
-                translationEngineSection
-                startStopSection
-                lowLatencySection
-                glossarySection
-                exportSection
-                copySection
-                if appState.hasFailedTranslations {
-                    retrySection
-                }
+    // MARK: - 配置条（#8）：语言 / 来源 / 引擎 / 处理模式 一行
+    private var configBar: some View {
+        HStack(spacing: 16) {
+            configItem(label: "语言") {
+                languagePicker
+                    .labelsHidden()
             }
-            .padding(20)
+            configItem(label: "来源") {
+                audioSourcePicker
+            }
+            configItem(label: "引擎") {
+                translationEnginePicker
+            }
+            Spacer(minLength: 8)
+            Picker("模式", selection: Binding(
+                get: { appState.processingMode },
+                set: { appState.processingMode = $0 }
+            )) {
+                Text("翻译").tag(AppState.ProcessingMode.translation)
+                Text("仅识别").tag(AppState.ProcessingMode.recognition)
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 150)
+            .help("仅识别：不翻译，适合中文/粤语母语内容")
         }
-        .frame(width: 320)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+        .background(CPColor.deepPanel)
+    }
+
+    private func configItem<Content: View>(label: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(spacing: 7) {
+            Text(label).font(.system(size: 11, weight: .semibold)).foregroundColor(CPColor.mutedText)
+            content()
+        }
+    }
+
+    // MARK: - 右侧动作轨（#8）：开始/停止 + 会话开关 + 快捷动作 + 跳转
+    private var actionRail: some View {
+        VStack(spacing: 14) {
+            startStopButton
+            railLink(title: "悬浮译文", systemImage: "pip.enter") {
+                appState.requestFloatingTranslationMode()
+            }
+            .help("自动开始翻译并隐藏主窗口，只显示置顶的中文译文")
+
+            railToggle(title: "低延迟预览", description: "句子完成前显示临时翻译",
+                       isOn: Binding(get: { appState.lowLatencyPreviewEnabled },
+                                     set: { appState.setLowLatencyPreview($0) }))
+            railToggle(title: "锁定字幕窗", description: "防观看时误拖动",
+                       isOn: Binding(get: { appState.subtitleWindowLocked },
+                                     set: { appState.subtitleWindowLocked = $0 }))
+
+            // 字幕样式快捷菜单（外观偏好仍在设置）
+            subtitleStyleMenu
+
+            railLink(title: "复制当前字幕", systemImage: "doc.on.doc",
+                     disabled: appState.recentEntriesForDisplay.isEmpty) {
+                appState.copyCurrentSubtitle()
+            }
+            railLink(title: "转写记录 · 摘要 · 导出", systemImage: "list.bullet.rectangle",
+                     disabled: appState.committedEntries.isEmpty) {
+                appState.onRequestShowBrowser?()
+            }
+            railLink(title: "设置", systemImage: "gearshape") {
+                appState.onRequestShowSettings?()
+            }
+
+            if appState.hasFailedTranslations {
+                Button {
+                    appState.retryFailedTranslations()
+                } label: {
+                    HStack {
+                        Image(systemName: "arrow.clockwise")
+                        Text("重试失败翻译").font(.system(size: 13, weight: .semibold))
+                        Spacer()
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .frame(maxWidth: .infinity)
+                    .background(CPColor.danger.opacity(0.85))
+                    .cornerRadius(10)
+                }
+                .buttonStyle(.plain)
+            }
+
+            Spacer()
+        }
+        .padding(16)
+        .frame(width: 224)
         .frame(maxHeight: .infinity, alignment: .top)
         .background(CPColor.deepPanel)
-        .overlay(capsuleBorder(corner: 22, color: CPColor.border))
-    }
-
-    private var sectionTitleFont: Font {
-        .system(size: 14, weight: .semibold)
-    }
-    private var sectionTitleColor: Color {
-        CPColor.secondaryText
-    }
-
-    // 8.1 当前语言
-    private var languageSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("当前语言").font(sectionTitleFont).foregroundColor(sectionTitleColor)
-            languagePicker
-            Text("一级菜单只显示当前语言，点击展开二级列表")
-                .font(.system(size: 11))
-                .foregroundColor(CPColor.mutedText)
+        .overlay(alignment: .leading) {
+            Rectangle().fill(CPColor.divider).frame(width: 1)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    // 8.1b 音频来源过滤（痛点1：排除通知音）
-    private var audioSourceSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("音频来源").font(sectionTitleFont).foregroundColor(sectionTitleColor)
-            audioSourcePicker
-            Text("过滤掉通讯类 app 通知音，避免字幕被干扰")
-                .font(.system(size: 11))
-                .foregroundColor(CPColor.mutedText)
+    private var startStopButton: some View {
+        Group {
+            if appState.isTranslating {
+                actionButton(title: "停止", enabled: true, accent: false) { appState.stopTranslation() }
+            } else {
+                actionButton(title: "开始转写", enabled: true, accent: true) { appState.startTranslation() }
+            }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private var subtitleStyleMenu: some View {
+        Menu {
+            ForEach(SubtitleStylePreset.allCases, id: \.rawValue) { preset in
+                Button(preset.label) { appState.subtitleStylePreset = preset }
+            }
+        } label: {
+            HStack {
+                Image(systemName: "paintbrush").font(.system(size: 13))
+                Text("字幕样式").font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Text(appState.subtitleStylePreset.label).font(.system(size: 11)).foregroundColor(CPColor.mutedText)
+                Image(systemName: "chevron.up.chevron.down").font(.system(size: 10)).foregroundColor(CPColor.mutedText)
+            }
+            .foregroundColor(CPColor.primaryText)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity)
+            .background(CPColor.fieldBackground)
+            .overlay(capsuleBorder(corner: 10, color: CPColor.fieldBorder))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func railToggle(title: String, description: String, isOn: Binding<Bool>) -> some View {
+        Toggle(isOn: isOn) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 13, weight: .semibold)).foregroundColor(CPColor.primaryText)
+                Text(description).font(.system(size: 10)).foregroundColor(CPColor.mutedText)
+            }
+        }
+        .toggleStyle(SwitchToggleStyle(tint: CPColor.accent))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(CPColor.fieldBackground)
+        .overlay(capsuleBorder(corner: 10, color: CPColor.fieldBorder))
+    }
+
+    private func railLink(title: String, systemImage: String, disabled: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 9) {
+                Image(systemName: systemImage).font(.system(size: 13))
+                Text(title).font(.system(size: 13, weight: .semibold))
+                Spacer()
+            }
+            .foregroundColor(CPColor.secondaryText)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(CPColor.fieldBackground)
+            .overlay(capsuleBorder(corner: 10, color: CPColor.fieldBorder))
+            .opacity(disabled ? 0.4 : 1.0)
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+    }
+
+    private func actionButton(title: String, enabled: Bool, accent: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 15, weight: .bold))
+                .foregroundColor(accent ? .white : CPColor.mutedText)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .background(
+                    Group {
+                        if accent {
+                            LinearGradient(
+                                colors: [CPColor.accent, CPColor.accentSecondary],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        } else {
+                            CPColor.fieldBackground
+                        }
+                    }
+                )
+                .overlay(capsuleBorder(corner: 14, color: accent ? .clear : CPColor.fieldBorder))
+                .opacity(enabled ? 1.0 : 0.4)
+        }
+        .disabled(!enabled)
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - 边框辅助
+    // 统一边框样式，避免每个控件各自手写 overlay。
+    private func capsuleBorder(corner: CGFloat = 14, color: Color) -> some View {
+        RoundedRectangle(cornerRadius: corner)
+            .stroke(color, lineWidth: 1)
+    }
+
+    // MARK: - 配置条用紧凑下拉（#8）
+    // audioSourcePicker / translationEnginePicker 去掉旧分区的外层标题与说明，
+    // 供 configBar 单行嵌入；languagePicker 已存在（带 label 版）此处复用。
     private var audioSourcePicker: some View {
         Menu {
             Button("全部系统音频") { appState.audioSourceFilter = .allSystem }
@@ -357,6 +542,36 @@ struct ControlPanelView: View {
         .buttonStyle(.plain)
     }
 
+    private var translationEnginePicker: some View {
+        Menu {
+            ForEach(TranslationEnginePreference.allCases, id: \.rawValue) { preference in
+                Button(preference.label) {
+                    appState.translationEnginePreference = preference
+                }
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "character.book.closed.fill")
+                    .font(.system(size: 13))
+                    .foregroundColor(CPColor.accentLight)
+                Text(appState.translationEnginePreference.label)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(CPColor.primaryText)
+                Spacer()
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(CPColor.secondaryText)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(CPColor.pickerBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(capsuleBorder(corner: 8, color: CPColor.pickerBorder))
+        }
+        .buttonStyle(.plain)
+        .help("设备端在本机翻译、字幕不出本机；不可用时自动回退 Bing（当前生效：\(appState.activeEngineName)）")
+    }
+
     /// 常见媒体播放 app 列表（仅捕获它们的音频）。
     private var commonMediaApps: [(name: String, bundleID: String)] {
         [
@@ -395,53 +610,7 @@ struct ControlPanelView: View {
         }
     }
 
-    // 8.1c 翻译引擎（spec B：Bing 在线 / 设备端优先）
-    private var translationEngineSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("翻译引擎").font(sectionTitleFont).foregroundColor(sectionTitleColor)
-            Menu {
-                ForEach(TranslationEnginePreference.allCases, id: \.rawValue) { preference in
-                    Button(preference.label) {
-                        appState.translationEnginePreference = preference
-                    }
-                }
-            } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: "character.book.closed.fill")
-                        .font(.system(size: 14))
-                        .foregroundColor(CPColor.accentLight)
-                    Text(appState.translationEnginePreference.label)
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(CPColor.primaryText)
-                    Spacer()
-                    HStack(spacing: 4) {
-                        Text("选择")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(CPColor.secondaryText)
-                        Image(systemName: "chevron.up.chevron.down")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundColor(CPColor.secondaryText)
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(CPColor.pickerHandleBg)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(CPColor.pickerBackground)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .overlay(capsuleBorder(corner: 10, color: CPColor.pickerBorder))
-            }
-            .buttonStyle(.plain)
-            Text("设备端在本机翻译、字幕不出本机；不可用时自动回退 Bing（当前生效：\(appState.activeEngineName)）")
-                .font(.system(size: 11))
-                .foregroundColor(CPColor.mutedText)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
+    // 8.1c 翻译引擎旧分区（#8 已迁 configBar，保留 translationEnginePicker；整段删除）
     private var languagePicker: some View {
         Menu {
             ForEach(SystemAudioTranscriber.supportedLanguages, id: \.id) { lang in
@@ -486,250 +655,5 @@ struct ControlPanelView: View {
             .overlay(capsuleBorder(corner: 10, color: CPColor.pickerBorder))
         }
         .buttonStyle(.plain)
-    }
-
-    // 语言包管理已迁入设置窗口（#7），控制面板不再保留此分区。
-
-    // 8.2 开始 / 停止
-    private var startStopSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("实时字幕").font(sectionTitleFont).foregroundColor(sectionTitleColor)
-            HStack(spacing: 12) {
-                actionButton(
-                    title: "开始",
-                    enabled: !appState.isTranslating,
-                    accent: true
-                ) {
-                    appState.startTranslation()
-                }
-                actionButton(
-                    title: "停止",
-                    enabled: appState.isTranslating,
-                    accent: false
-                ) {
-                    appState.stopTranslation()
-                }
-            }
-            Button {
-                appState.requestFloatingTranslationMode()
-            } label: {
-                HStack(spacing: 9) {
-                    Image(systemName: "pip.enter")
-                        .font(.system(size: 14, weight: .semibold))
-                    Text("悬浮译文")
-                        .font(.system(size: 14, weight: .semibold))
-                }
-                .foregroundColor(CPColor.primaryText)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 11)
-                .frame(maxWidth: .infinity)
-                .background(CPColor.fieldBackground)
-                .overlay(capsuleBorder(corner: 10, color: CPColor.fieldBorder))
-            }
-            .buttonStyle(.plain)
-            .help("自动开始翻译并隐藏主窗口，只显示置顶的中文译文")
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func actionButton(title: String, enabled: Bool, accent: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 15, weight: .bold))
-                .foregroundColor(accent ? .white : CPColor.mutedText)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
-                .background(
-                    Group {
-                        if accent {
-                            LinearGradient(
-                                colors: [CPColor.accent, CPColor.accentSecondary],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        } else {
-                            CPColor.fieldBackground
-                        }
-                    }
-                )
-                .overlay(capsuleBorder(corner: 14, color: accent ? .clear : CPColor.fieldBorder))
-                .opacity(enabled ? 1.0 : 0.4)
-        }
-        .disabled(!enabled)
-        .buttonStyle(.plain)
-    }
-
-    // 8.3 低延迟预览
-    private var lowLatencySection: some View {
-        toggleCard(
-            title: "低延迟预览",
-            description: "先显示短预览，句子完成后替换为正式翻译",
-            isOn: Binding(
-                get: { appState.lowLatencyPreviewEnabled },
-                set: { appState.setLowLatencyPreview($0) }
-            )
-        )
-    }
-
-    private func toggleCard(title: String, description: String, isOn: Binding<Bool>) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Toggle(isOn: isOn) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(title)
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundColor(CPColor.primaryText)
-                    Text(description)
-                        .font(.system(size: 11))
-                        .foregroundColor(CPColor.mutedText)
-                }
-            }
-            .toggleStyle(SwitchToggleStyle(tint: CPColor.accent))
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
-        .background(CPColor.fieldBackground)
-        .overlay(capsuleBorder(corner: 16, color: CPColor.fieldBorder))
-    }
-
-    // 8.5 术语表（痛点2：错译→正确译 查找替换）
-    @State private var glossaryWrongDraft = ""
-    @State private var glossaryCorrectDraft = ""
-
-    private var glossarySection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("术语表").font(sectionTitleFont).foregroundColor(sectionTitleColor)
-            Text("把反复出现的错译记下，之后所有译文自动替换。")
-                .font(.system(size: 11))
-                .foregroundColor(CPColor.mutedText)
-
-            HStack(spacing: 8) {
-                TextField("错译", text: $glossaryWrongDraft)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 13))
-                    .padding(8)
-                    .background(CPColor.deepFieldBackground)
-                    .overlay(capsuleBorder(corner: 8, color: CPColor.fieldBorder))
-                TextField("正确", text: $glossaryCorrectDraft)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 13))
-                    .padding(8)
-                    .background(CPColor.deepFieldBackground)
-                    .overlay(capsuleBorder(corner: 8, color: CPColor.fieldBorder))
-            }
-
-            Button {
-                guard !glossaryWrongDraft.isEmpty, !glossaryCorrectDraft.isEmpty else { return }
-                appState.upsertGlossaryPair(wrong: glossaryWrongDraft, correct: glossaryCorrectDraft)
-                glossaryWrongDraft = ""
-                glossaryCorrectDraft = ""
-            } label: {
-                Text("添加 / 覆盖")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(CPColor.primaryText)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 9)
-                    .background(CPColor.fieldBackground)
-                    .overlay(capsuleBorder(corner: 10, color: CPColor.fieldBorder))
-            }
-            .buttonStyle(.plain)
-            .disabled(glossaryWrongDraft.isEmpty || glossaryCorrectDraft.isEmpty)
-            .opacity(glossaryWrongDraft.isEmpty || glossaryCorrectDraft.isEmpty ? 0.4 : 1.0)
-
-            if !appState.glossary.pairs.isEmpty {
-                VStack(spacing: 6) {
-                    ForEach(Array(appState.glossary.pairs.enumerated()), id: \.element.wrong) { index, pair in
-                        HStack(spacing: 8) {
-                            Text("\(pair.wrong) → \(pair.correct)")
-                                .font(.system(size: 12))
-                                .foregroundColor(CPColor.secondaryText)
-                                .lineLimit(1)
-                            Spacer()
-                            Button {
-                                appState.removeGlossaryPair(at: index)
-                            } label: {
-                                Image(systemName: "trash")
-                                    .foregroundColor(CPColor.danger)
-                            }
-                            .buttonStyle(.plain)
-                            .help("删除此术语对")
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 7)
-                        .background(CPColor.fieldBackground)
-                        .overlay(capsuleBorder(corner: 8, color: CPColor.fieldBorder))
-                    }
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    // 8.6 转写记录入口（#6：导出已迁浏览器，此处保留跳转入口直至 #8 重构为动作轨）
-    private var exportSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("记录").font(sectionTitleFont).foregroundColor(sectionTitleColor)
-            VStack(spacing: 8) {
-                exportButton(title: "转写记录 · 摘要 · 导出") { appState.onRequestShowBrowser?() }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func exportButton(title: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundColor(CPColor.primaryText)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(CPColor.fieldBackground)
-                .overlay(capsuleBorder(corner: 10, color: CPColor.fieldBorder))
-        }
-        .disabled(appState.recentEntriesForDisplay.isEmpty)
-        .opacity(appState.recentEntriesForDisplay.isEmpty ? 0.4 : 1.0)
-        .buttonStyle(.plain)
-    }
-
-    // 8.7 复制（#6：复制最近 5 条已迁浏览器"复制全部"，此处保留当前字幕快捷复制）
-    private var copySection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("复制").font(sectionTitleFont).foregroundColor(sectionTitleColor)
-            VStack(spacing: 8) {
-                exportButton(title: "复制当前字幕") { appState.copyCurrentSubtitle() }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    // 8.8 翻译失败重试
-    private var retrySection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Button {
-                appState.retryFailedTranslations()
-            } label: {
-                HStack {
-                    Image(systemName: "arrow.clockwise")
-                    Text("重试失败翻译")
-                        .font(.system(size: 14, weight: .semibold))
-                    Spacer()
-                }
-                .foregroundColor(.white)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .frame(maxWidth: .infinity)
-                .background(CPColor.danger.opacity(0.85))
-                .cornerRadius(10)
-            }
-            .buttonStyle(.plain)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    // MARK: - 边框辅助
-    // 统一边框样式，避免每个控件各自手写 overlay。
-    private func capsuleBorder(corner: CGFloat = 14, color: Color) -> some View {
-        RoundedRectangle(cornerRadius: corner)
-            .stroke(color, lineWidth: 1)
     }
 }
