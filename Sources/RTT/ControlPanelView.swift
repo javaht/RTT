@@ -13,24 +13,44 @@ private extension Color {
 }
 
 private enum CPColor {
+    // 采用专业 macOS Pro 级暗黑设计系统（沉稳、克制、大气）：
+    // 深炭灰/石墨层级，搭配 Apple 系统级专业蓝，去除刺眼高饱和霓虹色
+
+    // 窗口与工作区背景
     static let appBackground = LinearGradient(
-        colors: [Color(hex: 0x101827), Color(hex: 0x0B1020)],
+        colors: [Color(hex: 0x14161B), Color(hex: 0x181A20)],
         startPoint: .top,
         endPoint: .bottom
     )
-    static let panelBackground = Color(hex: 0x111827)
-    static let deepPanel = Color(hex: 0x101826)
-    static let fieldBackground = Color(hex: 0x172236)
-    static let deepFieldBackground = Color(hex: 0x0D1422)
-    static let border = Color(hex: 0x26344D)
-    static let fieldBorder = Color(hex: 0x31425D)
-    static let divider = Color(hex: 0x243149)
-    static let accent = Color(hex: 0x28D3C2)
-    static let accentSecondary = Color(hex: 0x3A86FF)
-    static let danger = Color(hex: 0xEF4444)
-    static let primaryText = Color(hex: 0xF7FAFF)
-    static let secondaryText = Color(hex: 0xDDE7F4)
-    static let mutedText = Color(hex: 0x91A0B5)
+    static let panelBackground = Color(hex: 0x1C1F26)
+    static let deepPanel = Color(hex: 0x16181E)
+
+    // 普通卡片 / 字段背景
+    static let fieldBackground = Color(hex: 0x222630)
+    static let deepFieldBackground = Color(hex: 0x121418)
+
+    // 基础边框与分割线
+    static let border = Color(hex: 0x333A48)
+    static let fieldBorder = Color(hex: 0x3D4657)
+    static let divider = Color(hex: 0x272C38)
+
+    // 下拉框与交互控件：清晰的卡片衬底 + 柔和清晰的高亮边框
+    static let pickerBackground = Color(hex: 0x282D3B)
+    static let pickerHover = Color(hex: 0x313747)
+    static let pickerBorder = Color(hex: 0x4D5870)
+    static let pickerHandleBg = Color(hex: 0x343B4D) // 沉稳的次级胶囊背景
+
+    // 主题色与强调色：经典 macOS 科技蓝（沉稳大气）
+    static let accent = Color(hex: 0x3B82F6)          // Apple Pro 蓝
+    static let accentSecondary = Color(hex: 0x2563EB) // 深科技蓝
+    static let accentLight = Color(hex: 0x60A5FA)     // 柔和亮蓝（用于高亮图标/文字）
+    static let danger = Color(hex: 0xEF4444)          // 珊瑚红
+    static let success = Color(hex: 0x10B981)         // 翡翠绿
+
+    // 文字与图标层级：舒适清晰的专业排版
+    static let primaryText = Color(hex: 0xF8FAFC)
+    static let secondaryText = Color(hex: 0xCBD5E1)
+    static let mutedText = Color(hex: 0x8E9BAE)
 }
 
 /// RTT 视频控制面板主视图。
@@ -167,7 +187,7 @@ struct ControlPanelView: View {
     private func transcriptColumnHeader(title: String, systemImage: String) -> some View {
         HStack(spacing: 8) {
             Image(systemName: systemImage)
-                .foregroundColor(CPColor.accent)
+                .foregroundColor(CPColor.accentLight)
             Text(title)
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundColor(CPColor.primaryText)
@@ -295,24 +315,35 @@ struct ControlPanelView: View {
                 Button("仅 \(app.name)") { appState.audioSourceFilter = .only(bundleID: app.bundleID) }
             }
         } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "speaker.wave.2")
+            HStack(spacing: 10) {
+                Image(systemName: "speaker.wave.2.fill")
                     .font(.system(size: 14))
-                    .foregroundColor(CPColor.accent)
+                    .foregroundColor(CPColor.accentLight)
                 Text(audioSourceLabel)
                     .font(.system(size: 14, weight: .medium))
                     .foregroundColor(CPColor.primaryText)
                 Spacer()
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 10))
-                    .foregroundColor(CPColor.mutedText)
+                HStack(spacing: 4) {
+                    Text("选择")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(CPColor.secondaryText)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(CPColor.secondaryText)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(CPColor.pickerHandleBg)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
-            .background(CPColor.fieldBackground)
-            .overlay(capsuleBorder(corner: 12, color: CPColor.fieldBorder))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(CPColor.pickerBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(capsuleBorder(corner: 10, color: CPColor.pickerBorder))
         }
-        .menuStyle(.borderlessButton)
+        .buttonStyle(.plain)
     }
 
     /// 常见媒体播放 app 列表（仅捕获它们的音频）。
@@ -365,22 +396,36 @@ struct ControlPanelView: View {
                 }
             }
         } label: {
-            HStack {
+            HStack(spacing: 10) {
+                Image(systemName: "globe.asia.australia.fill")
+                    .font(.system(size: 14))
+                    .foregroundColor(CPColor.accentLight)
                 Text(appState.selectedLanguageLabel)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(.system(size: 14, weight: .medium))
                     .foregroundColor(CPColor.primaryText)
                 Spacer()
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(CPColor.mutedText)
+                // 下拉角标指示胶囊徽标，强化下拉按钮感知
+                HStack(spacing: 4) {
+                    Text("选择")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(CPColor.secondaryText)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(CPColor.secondaryText)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(CPColor.pickerHandleBg)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(CPColor.fieldBackground)
-            .overlay(capsuleBorder(corner: 14, color: CPColor.fieldBorder))
+            .background(CPColor.pickerBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(capsuleBorder(corner: 10, color: CPColor.pickerBorder))
         }
-        .menuStyle(.borderlessButton)
+        .buttonStyle(.plain)
     }
 
     private var languageAssetsSection: some View {
@@ -407,33 +452,63 @@ struct ControlPanelView: View {
                     .font(.system(size: 12))
                     .foregroundColor(CPColor.mutedText)
             } else {
-                VStack(spacing: 6) {
-                    ForEach(appState.languageAssets) { asset in
-                        HStack(spacing: 8) {
-                            Text(asset.label)
-                                .font(.system(size: 12))
-                                .foregroundColor(CPColor.secondaryText)
-                                .lineLimit(1)
-                            Spacer()
-                            Button {
-                                appState.confirmReleaseLanguage(asset)
-                            } label: {
-                                Image(systemName: "trash")
-                                    .foregroundColor(CPColor.danger)
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(appState.selectedLanguage == asset.id)
-                            .help(appState.selectedLanguage == asset.id ? "当前语言不能释放" : "释放语言包")
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(CPColor.fieldBackground)
-                        .overlay(capsuleBorder(corner: 8, color: CPColor.fieldBorder))
-                    }
-                }
+                languageAssetsPicker
+                Text("选择语言包以解除 RTT 占用；当前识别语言不可释放")
+                    .font(.system(size: 11))
+                    .foregroundColor(CPColor.mutedText)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // 语言包下拉框：每个语言包一行，点击非当前语言即弹确认释放，当前语言置灰。
+    private var languageAssetsPicker: some View {
+        Menu {
+            ForEach(appState.languageAssets) { asset in
+                let isCurrent = appState.selectedLanguage == asset.id
+                Button {
+                    if !isCurrent {
+                        appState.confirmReleaseLanguage(asset)
+                    }
+                } label: {
+                    if isCurrent {
+                        Text("🗑 \(asset.label) · 使用中")
+                    } else {
+                        Text("🗑 \(asset.label)")
+                    }
+                }
+                .disabled(isCurrent)
+            }
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "shippingbox.fill")
+                    .font(.system(size: 14))
+                    .foregroundColor(CPColor.accentLight)
+                Text("已安装 \(appState.languageAssets.count) 个")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(CPColor.primaryText)
+                Spacer()
+                HStack(spacing: 4) {
+                    Text("管理")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(CPColor.secondaryText)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(CPColor.secondaryText)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(CPColor.pickerHandleBg)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(CPColor.pickerBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(capsuleBorder(corner: 10, color: CPColor.pickerBorder))
+        }
+        .buttonStyle(.plain)
     }
 
     // 8.2 开始 / 停止
@@ -470,7 +545,7 @@ struct ControlPanelView: View {
                 .padding(.vertical, 11)
                 .frame(maxWidth: .infinity)
                 .background(CPColor.fieldBackground)
-                .overlay(capsuleBorder(corner: 10, color: CPColor.accent.opacity(0.55)))
+                .overlay(capsuleBorder(corner: 10, color: CPColor.fieldBorder))
             }
             .buttonStyle(.plain)
             .help("自动开始翻译并隐藏主窗口，只显示置顶的中文译文")
